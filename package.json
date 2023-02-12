@@ -22,7 +22,7 @@
   "author": "ptrpn",
   "license": "ISC",
   "devDependencies": {
-    "nodemon": "^2.0.15"
+    "nodemon": "^2.0.20"
   },
   "dependencies": {
     "crypto-js": "^4.1.1",
