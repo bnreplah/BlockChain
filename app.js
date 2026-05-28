@@ -45,6 +45,21 @@ const chainID = Bcoin.getGenesisSig();
 console.log(chainID);
 
 // ****************************************************************************
+// DARM-ANN v6.0 — Distributed Agentic Recursive Memory Network
+// The existing PoW blockchain (Bcoin) is bridged in as the Long-Term Memory
+// (LTM) tier. DARM-ANN layers the rest of the five-tier hierarchy
+// (WM -> EB -> STM -> LTM -> RRC) plus CDCP consensus consolidation and the
+// RCE replay engine on top of it. Fully self-contained: no Redis, no external
+// LLM, no external consensus service. See darm-ann/README.md for the full
+// mapping to the v6.0 white paper.
+// ****************************************************************************
+const DarmAnn = require('./darm-ann');
+const { repoChainAdapter } = require('./darm-ann/network/chainAdapter');
+const darm = new DarmAnn({ nodeId: n0deAddress, adapter: repoChainAdapter(Bcoin) });
+darm.autorun(); // background RCE replay + STM triage on self-contained timers
+console.log("[DARM-ANN] memory network online ->", JSON.stringify(darm.state().tiers));
+
+// ****************************************************************************
 // ROUTES:
 // ****************************************************************************
 
@@ -143,6 +158,53 @@ app.use('/api/user', authRoute);//everything in the offroute will have this pref
 //presents the working blockchain held on this node
 app.get("/blockchain", (req, res)=>{
     res.send(Bcoin);
+});
+
+
+//  ************************************************************************
+//  DARM-ANN Memory Network Endpoints
+//  ************************************************************************
+
+// observe: ingest a completed inference/claim (WM -> EB -> STM)
+app.post("/darm/observe", (req, res)=>{
+    const result = darm.observe({
+        claim: req.body.claim,
+        claims: req.body.claims,
+        reward: req.body.reward,
+        epistemic: req.body.epistemic,
+        agentId: req.body.agentId,
+    });
+    res.json({note: "Observation ingested into DARM-ANN", result});
+});
+
+// query: retrieve via the memory hierarchy (RRC -> STM -> LTM -> MISS)
+app.get("/darm/query", (req, res)=>{
+    res.json(darm.query(req.query.q || ""));
+});
+
+// teach / refute: seed the cluster knowledge graph (G_K) used by CDCP votes
+app.post("/darm/teach", (req, res)=>{
+    darm.teach(req.body.claim);
+    res.json({note: "Fact grounded across cluster voters"});
+});
+app.post("/darm/refute", (req, res)=>{
+    darm.refute(req.body.claim);
+    res.json({note: "Claim marked refuted across cluster voters"});
+});
+
+// replay: run one RCE consolidation cycle (nominates STM survivors to LTM)
+app.post("/darm/replay", (req, res)=>{
+    res.json(darm.replay());
+});
+
+// triage: run STM lifecycle management
+app.post("/darm/triage", (req, res)=>{
+    res.json(darm.triage());
+});
+
+// state: Sigma(t) snapshot of tier occupancies and the associative graph
+app.get("/darm/state", (req, res)=>{
+    res.json(darm.state());
 });
 
 
