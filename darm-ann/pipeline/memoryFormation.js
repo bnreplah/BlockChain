@@ -1,6 +1,5 @@
 'use strict';
 
-const { embed, cosineSimilarity } = require('../util/embedding');
 const { novelty, salienceScore } = require('./salience');
 const { claimId } = require('../util/hash');
 const { STATE } = require('../memory/shortTermMemory');
@@ -23,7 +22,7 @@ function extractClaims(input) {
  * `ctx` provides { eb, stm, cfg, accessFreq(embedding) }.
  */
 function memoryEncode({ cot, output, reward, epistemic }, ctx) {
-  const { eb, stm, cfg } = ctx;
+  const { eb, stm, cfg, embedder } = ctx;
   const maxReward = ctx.maxReward || 1;
   const existing = [...eb.embeddings(), ...stm.all().map((e) => e.embedding)];
   const candidates = extractClaims({ claims: cot && cot.claims, claim: output || (cot && cot.claim) });
@@ -31,7 +30,7 @@ function memoryEncode({ cot, output, reward, epistemic }, ctx) {
   const created = [];
 
   for (const c of candidates) {
-    const embedding = embed(c.text, cfg.embeddingDim);
+    const embedding = embedder.embed(c.text);
     const nov = novelty(embedding, existing);
     const rlrfWeight = Math.min(1, Math.max(0, reward / maxReward));
     const accessFreq = ctx.accessFreq ? ctx.accessFreq(embedding) : 0;

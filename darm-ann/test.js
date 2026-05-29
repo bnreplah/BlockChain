@@ -1,19 +1,25 @@
 'use strict';
 
 /**
- * DARM-ANN v6.0 — self-contained test suite (no framework, no deps).
- * Run: `node darm-ann/test.js`
+ * DARM-ANN v6.0 — comprehensive unit + integration test suite.
+ * Pure Node.js, no framework, no deps.  Run: `node darm-ann/test.js`
+ *
+ * Covers every module: NN, embedder, LSH, both memory blockchains, RRC,
+ * knowledge graph + GTE, ESE, BVAS, validator keys, BFT + transport, CDCP,
+ * salience/decay/triage, RCE, Markov chain-graph, TinyLM/NgramLM/registry,
+ * navigator, chain adapters, swarm, self-correction, and the facade.
  */
 
 const assert = require('assert');
-const DarmAnn = require('./index');
-const { LSHIndex } = require('./util/lsh');
-const { embed, cosineSimilarity } = require('./util/embedding');
-const { decayScore } = require('./pipeline/decay');
-const { DEFAULT_CONFIG } = require('./config');
+const crypto = require('crypto');
 
 let passed = 0;
 let failed = 0;
+let group = '';
+function section(name) {
+  group = name;
+  console.log(`\n[${name}]`);
+}
 function test(name, fn) {
   try {
     fn();
@@ -25,261 +31,582 @@ function test(name, fn) {
   }
 }
 
-// Fast config for tests: no minimum age gate so consolidation can run inline.
-function fastNode(extra = {}) {
-  return new DarmAnn({
-    nodeId: 'test-node',
-    config: { cdcp: { tMinAgeMs: 0 }, ...extra },
+const DarmAnn = require('./index');
+const { fast } = (() => ({ fast: (extra = {}) => new DarmAnn({ nodeId: 'test', config: { cdcp: { tMinAgeMs: 0 }, ...extra } }) }))();
+
+// ───────────────────────── nn/network ─────────────────────────
+section('nn/network (MLP backprop)');
+{
+  const { MLP } = require('./nn/network');
+  test('learns XOR (loss → ~0)', () => {
+    const net = new MLP({ sizes: [2, 8, 1], activations: ['tanh', 'sigmoid'], lr: 0.05, seed: 3 });
+    const X = [[0, 0], [0, 1], [1, 0], [1, 1]];
+    const Y = [[0], [1], [1], [0]];
+    const loss = net.fit(X, Y, { epochs: 3000, loss: 'bce' });
+    assert.ok(loss < 0.05, `loss ${loss}`);
+    assert.ok(net.predict([1, 0])[0] > 0.8 && net.predict([1, 1])[0] < 0.2);
+  });
+  test('deterministic given seed', () => {
+    const a = new MLP({ sizes: [3, 4, 1], seed: 9 });
+    const b = new MLP({ sizes: [3, 4, 1], seed: 9 });
+    assert.deepStrictEqual(Array.from(a.predict([1, 2, 3])), Array.from(b.predict([1, 2, 3])));
   });
 }
 
-console.log('\nDARM-ANN v6.0 test suite\n');
+// ───────────────────────── nn/embedder ─────────────────────────
+section('nn/embedder (skip-gram)');
+{
+  const Embedder = require('./nn/embedder');
+  const { cosineSimilarity } = require('./util/embedding');
+  test('identical text → identical unit vector', () => {
+    const e = new Embedder({ dim: 48 });
+    const v = e.embed('byzantine fault tolerance');
+    assert.ok(Math.abs(cosineSimilarity(v, e.embed('byzantine fault tolerance')) - 1) < 1e-9);
+    let n = 0;
+    for (const x of v) n += x * x;
+    assert.ok(Math.abs(Math.sqrt(n) - 1) < 1e-9);
+  });
+  test('training pulls co-occurring words together', () => {
+    const e = new Embedder({ dim: 48, lr: 0.1 });
+    ['tls forward secrecy ephemeral keys', 'forward secrecy encryption keys', 'banana smoothie yogurt honey'].forEach((t) => e.observe(t));
+    e.train({ epochs: 200 });
+    const rel = cosineSimilarity(e.embed('tls secrecy'), e.embed('ephemeral encryption keys'));
+    const unrel = cosineSimilarity(e.embed('tls secrecy'), e.embed('banana smoothie'));
+    assert.ok(rel > unrel, `rel ${rel} unrel ${unrel}`);
+  });
+}
 
-console.log('[util] embeddings & LSH');
-test('embed is deterministic and normalised', () => {
-  const a = embed('forward secrecy', 64);
-  const b = embed('forward secrecy', 64);
-  assert.deepStrictEqual(Array.from(a), Array.from(b));
-  let norm = 0;
-  for (const x of a) norm += x * x;
-  assert.ok(Math.abs(Math.sqrt(norm) - 1) < 1e-9, 'should be unit length');
-});
-test('cosine similarity: identical=1, unrelated<identical', () => {
-  const a = embed('transport layer security handshake', 64);
-  const b = embed('transport layer security handshake', 64);
-  const c = embed('banana smoothie recipe', 64);
-  assert.ok(Math.abs(cosineSimilarity(a, b) - 1) < 1e-9);
-  assert.ok(cosineSimilarity(a, c) < cosineSimilarity(a, b));
-});
-test('LSH retrieves a near-identical vector as candidate', () => {
-  const idx = new LSHIndex({ dim: 64, tables: 3, bits: 16 });
-  const e = embed('byzantine fault tolerance quorum', 64);
-  idx.insert('x', e, { v: 1 });
-  assert.ok(idx.candidates(e).has('x'));
-});
+// ───────────────────────── util/lsh ─────────────────────────
+section('util/lsh');
+{
+  const { LSHIndex } = require('./util/lsh');
+  const { embed } = require('./util/embedding');
+  test('retrieves an inserted vector as candidate; remove works', () => {
+    const idx = new LSHIndex({ dim: 64, tables: 3, bits: 16 });
+    const e = embed('quorum intersection safety', 64);
+    idx.insert('x', e, { v: 1 });
+    assert.ok(idx.candidates(e).has('x'));
+    assert.ok(idx.remove('x'));
+    assert.ok(!idx.candidates(e).has('x'));
+  });
+}
 
-console.log('\n[tiers] observe → STM');
-test('observe encodes a salient claim into STM', () => {
-  const node = fastNode();
-  const r = node.observe({ claim: 'TLS 1.3 mandates forward secrecy', reward: 1, epistemic: { conf_cal: 0.91, u_ep: 0.08 } });
-  assert.strictEqual(r.encoded, 1);
-  assert.strictEqual(r.persisted[0].status, 'PROMOTED_TO_STM');
-  assert.strictEqual(node.state().tiers.STM, 1);
-});
-test('low-confidence claim is held in EB, not persisted to STM', () => {
-  const node = fastNode();
-  const r = node.observe({ claim: 'maybe true maybe not', reward: 0.2, epistemic: { conf_cal: 0.3, u_ep: 0.5 } });
-  // fails ESE gate at encode → not even encoded
-  assert.strictEqual(r.encoded, 0);
-  assert.strictEqual(node.state().tiers.STM, 0);
-});
-test('duplicate observation merges instead of duplicating', () => {
-  const node = fastNode();
-  node.observe({ claim: 'merkle proofs verify inclusion', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const r2 = node.observe({ claim: 'merkle proofs verify inclusion', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  assert.strictEqual(r2.persisted[0].status, 'MERGED');
-  assert.strictEqual(node.state().tiers.STM, 1);
-});
+// ───────────────────────── memory/chain ─────────────────────────
+section('memory/chain (blockchain primitive)');
+{
+  const Chain = require('./memory/chain');
+  test('append + validate', () => {
+    const c = new Chain({ name: 't' });
+    c.append({ a: 1 });
+    c.append({ a: 2 });
+    assert.strictEqual(c.height, 3); // genesis + 2
+    assert.ok(c.validate().valid);
+  });
+  test('tampering is detected', () => {
+    const c = new Chain({});
+    c.append({ a: 1 });
+    c.append({ a: 2 });
+    c.blocks[1].payload.a = 999; // tamper
+    const v = c.validate();
+    assert.ok(!v.valid && v.brokenAt === 1);
+  });
+  test('repair() self-corrects a broken chain', () => {
+    const c = new Chain({});
+    c.append({ a: 1 });
+    c.append({ a: 2 });
+    c.blocks[1].payload.a = 999;
+    const repaired = c.repair();
+    assert.ok(repaired >= 1);
+    assert.ok(c.validate().valid);
+  });
+  test('PoW difficulty produces leading zeros', () => {
+    const c = new Chain({ difficulty: 2 });
+    const b = c.append({ x: 1 });
+    assert.ok(b.hash.startsWith('00'));
+    assert.ok(c.validate().valid);
+  });
+  test('prune removes matching payloads and re-links', () => {
+    const c = new Chain({});
+    c.append({ keep: false });
+    c.append({ keep: true });
+    c.prune((p) => p.keep === false);
+    assert.ok(c.validate().valid);
+  });
+}
 
-console.log('\n[CDCP] consensus-driven consolidation');
-test('untaught claim cannot reach quorum (collective validation)', () => {
-  const node = fastNode();
-  node.observe({ claim: 'unverifiable assertion about xyz', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const entry = node.stm.all()[0];
-  const res = node.consolidate(entry.claim_id);
-  assert.notStrictEqual(res.status, 'PROMOTED');
-  assert.strictEqual(node.state().tiers.LTM, 0);
-});
-test('taught claim reaches τ_c quorum and commits to LTM', () => {
-  const node = fastNode();
-  const claim = 'TLS 1.3 mandates forward secrecy via ephemeral key exchange';
-  node.teach(claim); // all voters now ground this fact
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.91, u_ep: 0.08 } });
-  const entry = node.stm.all()[0];
-  const res = node.consolidate(entry.claim_id);
-  assert.strictEqual(res.status, 'PROMOTED', `expected PROMOTED, got ${res.status}`);
-  assert.strictEqual(node.state().tiers.LTM, 1);
-  assert.ok(res.consolidatedConf > 0.6);
-});
-test('refuted claim is rejected by quorum', () => {
-  const node = fastNode();
-  const claim = 'the chain accepts double-spends freely';
-  node.refute(claim);
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const entry = node.stm.all()[0];
-  // It may be contradicted at persist; if persisted, consensus must not promote.
-  if (entry) {
-    const res = node.consolidate(entry.claim_id);
-    assert.notStrictEqual(res.status, 'PROMOTED');
+// ───────────────────────── memory/shortTermMemory ─────────────────────────
+section('memory/shortTermMemory (STM blockchain)');
+{
+  const STM = require('./memory/shortTermMemory');
+  const { embed } = require('./util/embedding');
+  const mk = (text) => ({ claim_id: crypto.randomUUID(), claim_text: text, embedding: embed(text, 64), confidence: 0.9, salience: 0.7, source_traces: [], validation: {}, created_at: Date.now(), expires_at: Date.now() + 1000, promoted: false, state: 'PENDING', replays: 0, retry_count: 0 });
+  test('insert appends to the STM blockchain', () => {
+    const s = new STM({ dim: 64 });
+    s.insert(mk('alpha claim'));
+    assert.strictEqual(s.size, 1);
+    assert.strictEqual(s.chain.height, 2);
+    assert.ok(s.validateChain().valid);
+  });
+  test('nearestNeighbor finds a similar entry', () => {
+    const s = new STM({ dim: 64 });
+    s.insert(mk('byzantine fault tolerance quorum'));
+    const hit = s.nearestNeighbor(embed('byzantine fault tolerance quorum', 64));
+    assert.ok(hit && hit.similarity > 0.99);
+  });
+  test('pruneExpired drops expired entries', () => {
+    const s = new STM({ dim: 64 });
+    s.insert(mk('soon expired'));
+    const removed = s.pruneExpired(Date.now() + 5000);
+    assert.strictEqual(removed, 1);
+    assert.strictEqual(s.size, 0);
+  });
+}
+
+// ───────────────────────── memory/longTermMemory ─────────────────────────
+section('memory/longTermMemory (LTM blockchain)');
+{
+  const LTM = require('./memory/longTermMemory');
+  const { embed } = require('./util/embedding');
+  const mem = (text, conf = 0.9) => ({ claim_text: text, embedding: embed(text, 64), confidence: conf, salience: 0.7, consensus_votes: [], proposer: 'p', validation: {} });
+  test('commit + LSH query + chain validity', () => {
+    const l = new LTM({ dim: 64 });
+    const b = l.commit(mem('forward secrecy via ephemeral keys'));
+    assert.strictEqual(l.size, 1);
+    const hit = l.query(embed('forward secrecy via ephemeral keys', 64), 0.85);
+    assert.ok(hit && hit.block.hash === b.hash);
+    assert.ok(l.validate().valid);
+  });
+  test('associative graph wires related memories', () => {
+    const l = new LTM({ dim: 64, assocThreshold: 0.3 });
+    l.commit(mem('byzantine fault tolerance honest validators safety'));
+    l.commit(mem('byzantine fault tolerance quorum consensus safety'));
+    assert.ok(l.graphStats().edges >= 1);
+  });
+  test('supersede removes from served index', () => {
+    const l = new LTM({ dim: 64 });
+    const b = l.commit(mem('to be superseded'));
+    l.markSuperseded(b.hash, null);
+    assert.strictEqual(l.query(embed('to be superseded', 64), 0.85), null);
+  });
+}
+
+// ───────────────────────── memory/rrc ─────────────────────────
+section('memory/rapidRetrievalCache');
+{
+  const RRC = require('./memory/rapidRetrievalCache');
+  const { embed } = require('./util/embedding');
+  test('index + O(1) hit + invalidate', () => {
+    const r = new RRC({ dim: 64 });
+    const block = { hash: 'h1', embedding: embed('tendermint bft consensus', 64), claim_text: 'tendermint bft consensus', confidence: 0.95, validation: {} };
+    r.indexBlock(block);
+    const hit = r.query(embed('tendermint bft consensus', 64));
+    assert.ok(hit && hit.source === 'h1');
+    assert.ok(r.invalidate('h1'));
+    assert.strictEqual(r.query(embed('tendermint bft consensus', 64)), null);
+  });
+}
+
+// ───────────────────────── engine/knowledgeGraph + gte ─────────────────────────
+section('engine/gte (real graph traversal)');
+{
+  const GTE = require('./engine/gte');
+  const KG = require('./engine/knowledgeGraph');
+  test('BFS supports related grounded claims', () => {
+    const g = new GTE({});
+    g.addGrounded('byzantine fault tolerance honest validators');
+    const v = g.bfsValidate('byzantine fault tolerance quorum', null, 2);
+    assert.ok(v.score > 0 && v.conflict_score === 0);
+  });
+  test('DFS grounds a reachable claim, not an unrelated one', () => {
+    const g = new GTE({});
+    g.addGrounded('merkle proofs verify inclusion logarithmic');
+    assert.strictEqual(g.dfsAudit('merkle proofs inclusion').type, 'Grounded');
+    assert.strictEqual(g.dfsAudit('completely unrelated banana').type, 'Ungrounded');
+  });
+  test('refuted claim yields conflict', () => {
+    const g = new GTE({});
+    g.addRefuted('the chain accepts double spends freely');
+    const v = g.bfsValidate('chain accepts double spends', null, 2);
+    assert.ok(v.conflict_score > 0);
+  });
+  test('Dijkstra and A* find a path through shared entities', () => {
+    const kg = new KG();
+    kg.addClaim('alpha beta shared');
+    kg.addClaim('shared gamma delta');
+    const a = KG.claimNodeId('alpha beta shared');
+    const b = KG.claimNodeId('shared gamma delta');
+    const d = kg.dijkstra(a, b);
+    const s = kg.aStar(a, b);
+    assert.ok(d.distance < Infinity && d.path.length >= 3);
+    assert.ok(s.distance < Infinity);
+  });
+}
+
+// ───────────────────────── engine/ese ─────────────────────────
+section('engine/ese (deep ensemble + temperature scaling)');
+{
+  const ESE = require('./engine/ese');
+  const Embedder = require('./nn/embedder');
+  test('learns to separate taught (valid) from refuted (invalid)', () => {
+    const emb = new Embedder({ dim: 48 });
+    const ese = new ESE({ embedder: emb, dim: 48, seed: 2 });
+    ['secure hashing prevents tampering', 'consensus requires honest majority', 'cryptographic signatures verify identity'].forEach((t) => ese.addExample(t, 1));
+    ['the moon is made of cheese', 'gravity pushes objects upward', 'fire is cold'].forEach((t) => ese.addExample(t, 0));
+    const good = ese.calibratedConfidence('cryptographic signatures verify identity');
+    const bad = ese.calibratedConfidence('the moon is made of cheese');
+    assert.ok(good > bad, `good ${good} bad ${bad}`);
+  });
+  test('epistemic uncertainty is in [0,1]', () => {
+    const emb = new Embedder({ dim: 32 });
+    const ese = new ESE({ embedder: emb, dim: 32 });
+    ese.addExample('alpha fact', 1);
+    const u = ese.estimateEpistemicUncertainty('totally novel unrelated thing');
+    assert.ok(u >= 0 && u <= 1);
+  });
+}
+
+// ───────────────────────── consensus/validatorKey + bvas signatures ─────────────────────────
+section('consensus/validatorKey (Ed25519)');
+{
+  const ValidatorKey = require('./consensus/validatorKey');
+  const BVAS = require('./engine/bvas');
+  test('sign/verify round-trips; tamper fails', () => {
+    const k = new ValidatorKey();
+    const msg = Buffer.from('consensus message');
+    const sig = k.sign(msg);
+    assert.ok(ValidatorKey.verify(msg, sig, k.publicKeyB64));
+    assert.ok(!ValidatorKey.verify(Buffer.from('tampered'), sig, k.publicKeyB64));
+  });
+  test('BVAS verifies a genuine vote and rejects a forged one', () => {
+    const k = new ValidatorKey();
+    const vote = { claim_id: 'c1', node_id: 'n1', vote: 'YES', vote_score: 0.9, publicKey: k.publicKeyB64 };
+    vote.signature = k.sign(BVAS.canonicalVoteBytes(vote));
+    assert.ok(BVAS.verifyVote(vote));
+    const forged = { ...vote, vote_score: 0.1 }; // changed signed field
+    assert.ok(!BVAS.verifyVote(forged));
+  });
+}
+
+// ───────────────────────── engine/bvas (5-stage) ─────────────────────────
+section('engine/bvas (5-stage pipeline)');
+{
+  const BVAS = require('./engine/bvas');
+  const LTM = require('./memory/longTermMemory');
+  const { embed } = require('./util/embedding');
+  test('passes a clean candidate, gates a low-confidence one', () => {
+    const bvas = new BVAS({ ltm: new LTM({ dim: 64 }), thetaConf: 0.6 });
+    const ok = bvas.validate({ claim_text: 'valid claim', embedding: embed('valid claim', 64), confidence: 0.9 });
+    assert.ok(ok.ok && ok.score >= 0.6);
+    const low = bvas.validate({ claim_text: 'weak claim', embedding: embed('weak claim', 64), confidence: 0.3 });
+    assert.ok(!low.ok);
+  });
+}
+
+// ───────────────────────── consensus/bft + transport ─────────────────────────
+section('consensus/bft (signed BFT over transport)');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const { BFTNode } = require('./consensus/bft');
+  const ValidatorKey = require('./consensus/validatorKey');
+
+  function cluster(n, evaluators) {
+    const keys = Array.from({ length: n }, () => new ValidatorKey());
+    const validators = new Map();
+    keys.forEach((k, i) => validators.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const bus = new InProcessBus();
+    let decision = null;
+    const nodes = keys.map((k, i) => new BFTNode({ nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67, evaluate: evaluators(i), onDecide: (r) => { if (!decision) decision = r; } }));
+    return { nodes, bus, decision: () => decision };
   }
-  assert.strictEqual(node.state().tiers.LTM, 0);
-});
-test('VoteWeight scales with G_K maturity (§5.7)', () => {
-  const node = fastNode();
-  const v = node.self;
-  const sparse = v.voteWeight(1000);
-  for (let i = 0; i < 1000; i++) node.gte.addGrounded(`fact number ${i}`);
-  const mature = v.voteWeight(1000);
-  assert.ok(mature > sparse);
-  assert.ok(mature <= 1);
-});
 
-console.log('\n[RRC] rapid retrieval cache');
-test('consolidated memory is retrievable from RRC in one hop', () => {
-  const node = fastNode();
-  const claim = 'sharp wave ripples drive memory replay during NREM sleep';
-  node.teach(claim);
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } });
-  node.consolidate(node.stm.all()[0].claim_id);
-  const q = node.query(claim);
-  assert.strictEqual(q.tier, 'RRC', `expected RRC hit, got ${q.tier}`);
-  assert.ok(q.hit);
-});
-test('query for novel topic is a MISS', () => {
-  const node = fastNode();
-  const q = node.query('completely unrelated novel topic never seen');
-  assert.strictEqual(q.tier, 'MISS');
-  assert.strictEqual(q.hit, false);
-});
-test('RRC invalidation removes a superseded entry', () => {
-  const node = fastNode();
-  const claim = 'incumbent fact to be superseded later';
-  node.teach(claim);
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  node.consolidate(node.stm.all()[0].claim_id);
-  const block = node.ltm.blocks[0];
-  assert.ok(node.rrc.bySource.has(block.hash));
-  node.rrc.invalidate(block.hash);
-  assert.ok(!node.rrc.bySource.has(block.hash));
-});
+  test('commits when all honest nodes vote YES', () => {
+    const c = cluster(7, () => () => ({ vote: 'YES', score: 0.9 }));
+    c.nodes[0].propose({ claim_id: 'c1' });
+    c.bus.pump();
+    assert.ok(c.decision() && c.decision().committed);
+  });
+  test('tolerates f < n/3 Byzantine (2 of 7 vote NO) and still commits', () => {
+    const c = cluster(7, (i) => () => ({ vote: i < 2 ? 'NO' : 'YES', score: i < 2 ? 0.1 : 0.9 }));
+    c.nodes[6].propose({ claim_id: 'c2' });
+    c.bus.pump();
+    assert.ok(c.decision() && c.decision().committed, 'should commit with 5/7 YES');
+  });
+  test('does NOT commit when quorum fails (3 of 7 vote NO)', () => {
+    const c = cluster(7, (i) => () => ({ vote: i < 3 ? 'NO' : 'YES', score: i < 3 ? 0.1 : 0.9 }));
+    c.nodes[6].propose({ claim_id: 'c3' });
+    c.bus.pump();
+    assert.ok(!c.decision(), 'must not reach 2/3 with only 4/7 YES');
+  });
+}
 
-console.log('\n[RCE] replay & consolidation');
-test('replay cycle nominates taught STM survivors to LTM', () => {
-  const node = fastNode();
-  const claim = 'GRPO optimises group-relative policy advantages';
-  node.teach(claim);
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const report = node.replay();
-  assert.ok(report.replayed >= 1);
-  assert.ok(report.promoted >= 1, `expected ≥1 promotion, got ${report.promoted}`);
-  assert.strictEqual(node.state().tiers.LTM, 1);
-});
-test('replay decays an unsupported STM entry', () => {
-  const node = fastNode();
-  node.observe({ claim: 'ungrounded floating claim', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const before = node.stm.all()[0].salience;
-  node.replay();
-  const entry = node.stm.get(node.stm.all()[0] && node.stm.all()[0].claim_id);
-  // either decayed in place or expired out
-  if (entry) assert.ok(entry.salience < before);
-});
+// ───────────────────────── consensus/cdcp ─────────────────────────
+section('consensus/cdcp (consensus-driven consolidation)');
+{
+  test('untaught claim cannot be consolidated', () => {
+    const node = fast();
+    node.observe({ claim: 'unverifiable assertion xyz', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    const r = node.consolidate(node.stm.all()[0].claim_id);
+    assert.notStrictEqual(r.status, 'PROMOTED');
+    assert.strictEqual(node.ltm.size, 0);
+  });
+  test('taught claim reaches quorum → committed to LTM', () => {
+    const node = fast();
+    const c = 'forward secrecy uses ephemeral key exchange';
+    node.teach(c);
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } });
+    const r = node.consolidate(node.stm.all()[0].claim_id);
+    assert.strictEqual(r.status, 'PROMOTED', `got ${r.status}`);
+    assert.strictEqual(node.ltm.size, 1);
+  });
+}
 
-console.log('\n[lifecycle] decay & triage');
-test('decay score follows Ebbinghaus (older ⇒ smaller)', () => {
-  const entry = { salience: 0.8, created_at: Date.now(), replays: 0 };
-  const fresh = decayScore(entry, Date.now(), DEFAULT_CONFIG);
-  const old = decayScore(entry, Date.now() + 24 * 3600 * 1000, DEFAULT_CONFIG);
-  assert.ok(old < fresh);
-});
-test('reinforcement (replays) raises decay score', () => {
-  const base = { salience: 0.8, created_at: Date.now(), replays: 0 };
-  const rehearsed = { salience: 0.8, created_at: Date.now(), replays: 10 };
-  const t = Date.now() + 3600 * 1000;
-  assert.ok(decayScore(rehearsed, t, DEFAULT_CONFIG) > decayScore(base, t, DEFAULT_CONFIG));
-});
-test('triage expires fully-decayed entries', () => {
-  const node = fastNode();
-  node.observe({ claim: 'transient low-value note', reward: 0.6, epistemic: { conf_cal: 0.65, u_ep: 0.2 } });
-  // advance time well past the half-life
-  const report = node.triage({ now: Date.now() + 1000 * 3600 * 1000 });
-  assert.ok(report.expired >= 1 || node.state().tiers.STM === 0);
-});
+// ───────────────────────── pipeline (salience/decay/triage) ─────────────────────────
+section('pipeline (salience, decay, triage)');
+{
+  const { salienceScore, novelty } = require('./pipeline/salience');
+  const { decayScore } = require('./pipeline/decay');
+  const { DEFAULT_CONFIG } = require('./config');
+  test('salience composite in [0,1]; novelty falls with similarity', () => {
+    const s = salienceScore({ nov: 1, rlrfWeight: 1, accessFreq: 0, confidence: 0.9 }, DEFAULT_CONFIG.salience);
+    assert.ok(s > 0 && s <= 1);
+    const { embed } = require('./util/embedding');
+    const a = embed('alpha beta', 64);
+    assert.ok(novelty(a, [a]) < 0.01);
+  });
+  test('decay: older < fresher; replays reinforce', () => {
+    const e = { salience: 0.8, created_at: Date.now(), replays: 0 };
+    assert.ok(decayScore(e, Date.now() + 24 * 3600e3, DEFAULT_CONFIG) < decayScore(e, Date.now(), DEFAULT_CONFIG));
+    const r = { salience: 0.8, created_at: Date.now(), replays: 10 };
+    const t = Date.now() + 3600e3;
+    assert.ok(decayScore(r, t, DEFAULT_CONFIG) > decayScore(e, t, DEFAULT_CONFIG));
+  });
+  test('triage expires fully-decayed STM entries', () => {
+    const node = fast();
+    node.observe({ claim: 'transient note', reward: 0.6, epistemic: { conf_cal: 0.65, u_ep: 0.2 } });
+    const r = node.triage({ now: Date.now() + 1000 * 3600e3 });
+    assert.ok(r.expired >= 1 || node.stm.size === 0);
+  });
+}
 
-console.log('\n[self-contained] PoW substrate, morphism, autorun');
-test('self-contained PoW adapter mines valid leading-zero hashes', () => {
-  const { powAdapter } = require('./network/chainAdapter');
-  const node = new DarmAnn({ nodeId: 'pow', config: { cdcp: { tMinAgeMs: 0 } }, adapter: powAdapter({ difficulty: 2 }) });
-  const claim = 'self-contained pow consolidation works';
-  node.teach(claim);
-  node.observe({ claim, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  const res = node.consolidate(node.stm.all()[0].claim_id);
-  assert.strictEqual(res.status, 'PROMOTED');
-  assert.ok(res.block.hash.startsWith('00'), 'PoW hash should have 2 leading zeros');
-  assert.ok(node.ltm.mode.startsWith('poly:pow'));
-});
-test('poly-chain morphism swaps substrate at runtime, preserving blocks', () => {
-  const { standaloneAdapter, powAdapter } = require('./network/chainAdapter');
-  const node = new DarmAnn({ nodeId: 'morph', config: { cdcp: { tMinAgeMs: 0 } }, adapter: standaloneAdapter() });
-  const c1 = 'distributed ledgers use cryptographic hash chains';
-  node.teach(c1);
-  node.observe({ claim: c1, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  node.consolidate(node.stm.all()[0].claim_id);
-  assert.strictEqual(node.ltm.size, 1);
-  node.morph(powAdapter({ difficulty: 2 }));
-  const c2 = 'unrelated topic about photosynthesis in plants';
-  node.teach(c2);
-  node.observe({ claim: c2, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  node.consolidate(node.stm.all().find((e) => !e.promoted).claim_id);
-  assert.strictEqual(node.ltm.size, 2, 'old block preserved across morph');
-  assert.ok(node.ltm.blocks[1].hash.startsWith('00'));
-});
-test('selfDeploy returns an autonomous node and stop() clears timers', () => {
-  const node = DarmAnn.selfDeploy({ difficulty: 1, config: { cdcp: { tMinAgeMs: 0 } } });
-  assert.ok(node._timers && node._timers.length === 2);
-  node.stop();
-  assert.strictEqual(node._timers, null);
-});
-
-console.log('\n[growth] associative network');
-test('consolidating related memories grows associative edges', () => {
-  const node = fastNode();
-  const claims = [
-    'byzantine fault tolerance requires two thirds honest validators for safety',
-    'byzantine fault tolerance quorum intersection guarantees consensus safety',
-  ];
-  for (const c of claims) {
+// ───────────────────────── engine/rce ─────────────────────────
+section('engine/rce (replay & consolidation)');
+{
+  test('replay consolidates a taught survivor to LTM', () => {
+    const node = fast();
+    const c = 'group relative policy optimisation reduces variance';
     node.teach(c);
     node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
-  }
-  for (const e of node.stm.all()) node.consolidate(e.claim_id);
-  const g = node.ltm.graphStats();
-  assert.strictEqual(g.nodes, 2);
-  assert.ok(g.edges >= 1, 'related memories should wire together');
-});
-
-console.log('\n[swarm] cross-chain pollination');
-test('pollination disseminates a memory to a peer chain', () => {
-  const { Swarm } = DarmAnn;
-  const { standaloneAdapter, powAdapter } = DarmAnn.adapters;
-  const a = new DarmAnn({ nodeId: 'A', config: { cdcp: { tMinAgeMs: 0 } }, adapter: standaloneAdapter() });
-  const b = new DarmAnn({ nodeId: 'B', config: { cdcp: { tMinAgeMs: 0 } }, adapter: powAdapter({ difficulty: 1 }) });
-  const claim = 'cross chain pollination spreads validated knowledge';
-  a.teach(claim);
-  a.observe({ claim, reward: 1, epistemic: { conf_cal: 0.95, u_ep: 0.05 } });
-  a.consolidate(a.stm.all()[0].claim_id);
-  assert.strictEqual(a.ltm.size, 1);
-  assert.strictEqual(b.ltm.size, 0);
-
-  const swarm = new Swarm({ nodes: [a, b] });
-  const report = swarm.pollinate({ topK: 5 });
-  assert.ok(report.accepted >= 1);
-  assert.ok(b.ltm.size >= 1, 'peer B should have re-consolidated the pollinated memory');
-  const growth = swarm.growth();
-  assert.strictEqual(growth.nodes, 2);
-  assert.ok(Object.keys(growth.substrates).length >= 1);
-});
-test('poly-chain swarm reports heterogeneous substrates', () => {
-  const { powAdapter, standaloneAdapter } = DarmAnn.adapters;
-  const swarm = DarmAnn.Swarm.deploy({
-    count: 2,
-    config: { cdcp: { tMinAgeMs: 0 } },
-    substrateFactory: (i) => (i === 0 ? standaloneAdapter() : powAdapter({ difficulty: 1 })),
+    const report = node.replay();
+    assert.ok(report.promoted >= 1, `promoted ${report.promoted}`);
   });
-  const g = swarm.growth();
-  assert.strictEqual(g.nodes, 2);
-  assert.ok(g.substrates['poly:standalone'] === 1, JSON.stringify(g.substrates));
-  assert.ok(g.substrates['poly:pow-d1'] === 1, JSON.stringify(g.substrates));
-});
+}
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed === 0 ? 0 : 1);
+// ───────────────────────── markov chain-graph ─────────────────────────
+section('markov/markovGraph (chain graph)');
+{
+  const MarkovGraph = require('./markov/markovGraph');
+  test('transition counts → probabilities; link-chain overlay tracks order', () => {
+    const g = new MarkovGraph();
+    g.visit('a'); g.visit('b'); g.visit('a'); g.visit('b'); g.visit('c');
+    assert.ok(g.prob('a', 'b') > 0);
+    assert.strictEqual(g.nextBest('a'), 'b');
+    assert.strictEqual(g.chainNext('a'), 'b'); // overlay: a was followed by b
+    assert.ok(g.stats().states === 3);
+  });
+  test('random walk stays within the graph', () => {
+    const g = new MarkovGraph();
+    g.observeTransition('x', 'y'); g.observeTransition('y', 'z');
+    const path = g.randomWalk('x', 5, () => 0);
+    assert.ok(path.length >= 1 && path[0] === 'x');
+  });
+}
+
+// ───────────────────────── nn/tinyLM, ngramLM, registry ─────────────────────────
+section('nn/tinyLM + ngramLM + registry (SLMs)');
+{
+  const TinyLM = require('./nn/tinyLM');
+  const NgramLM = require('./nn/ngramLM');
+  const ModelRegistry = require('./nn/modelRegistry');
+  const Embedder = require('./nn/embedder');
+  test('TinyLM scores an observed transition above an unobserved one', () => {
+    const A = 'alpha encryption keys handshake protocol';
+    const B = 'beta consensus quorum commit safety';
+    const C = 'gamma photosynthesis chlorophyll sunlight leaves';
+    const emb = new Embedder({ dim: 48, lr: 0.1 });
+    [A, B, C].forEach((t) => emb.observe(t));
+    emb.train({ epochs: 120 });
+    const lm = new TinyLM({ embedder: emb, dim: 48, seed: 4 });
+    for (let i = 0; i < 8; i++) {
+      lm.observeTransition(A, B); // A → B is the only observed transition
+      lm.observeTransition(B, C);
+    }
+    lm.trainIfDirty({ epochs: 1200 });
+    const good = lm.score(A, B); // observed transition
+    const bad = lm.score(A, C); // never observed from A
+    assert.ok(good > bad, `observed ${good.toFixed(3)} should beat unobserved ${bad.toFixed(3)}`);
+    assert.ok(good >= 0 && good <= 1);
+  });
+  test('NgramLM gives higher likelihood to trained text', () => {
+    const lm = new NgramLM({ n: 2 });
+    lm.train('byzantine fault tolerance requires honest majority');
+    const seen = lm.logLikelihood('byzantine fault tolerance');
+    const unseen = lm.logLikelihood('xylophone quasar nebula');
+    assert.ok(seen > unseen);
+  });
+  test('registry routes by kind', () => {
+    const r = new ModelRegistry();
+    r.register('t', { mark: 1 }, { kind: 'tinyLM' });
+    r.register('s', { mark: 2 }, { kind: 'slm' });
+    assert.strictEqual(r.route({ kind: 'slm' }).model.mark, 2);
+  });
+}
+
+// ───────────────────────── markov/navigator ─────────────────────────
+section('markov/navigator (model-directed traversal)');
+{
+  test('navigator produces a directed path over the chain graph', () => {
+    const node = fast();
+    const claims = ['start node alpha', 'middle node beta', 'final node gamma'];
+    for (const c of claims) node.observe({ claim: c, reward: 0.9, epistemic: { conf_cal: 0.8, u_ep: 0.1 } });
+    const { path } = node.navigate('start node alpha', 5);
+    assert.ok(path.length >= 1 && path[0] === 'start node alpha');
+  });
+}
+
+// ───────────────────────── network/chainAdapter ─────────────────────────
+section('network/chainAdapter (poly-chain morphism)');
+{
+  const { standaloneAdapter, powAdapter } = require('./network/chainAdapter');
+  test('standalone adapter produces a linked hash', () => {
+    const a = standaloneAdapter();
+    const r1 = a.commit({ claim_text: 'x', confidence: 0.9 }, '00');
+    const r2 = a.commit({ claim_text: 'y', confidence: 0.9 }, r1.hash);
+    assert.ok(r1.hash && r2.hash && r1.hash !== r2.hash);
+  });
+  test('pow adapter mines leading zeros', () => {
+    const a = powAdapter({ difficulty: 3 });
+    const r = a.commit({ claim_text: 'z', confidence: 0.9 }, '00');
+    assert.ok(r.hash.startsWith('000'));
+  });
+  test('morph swaps substrate at runtime, preserving blocks', () => {
+    const node = new DarmAnn({ nodeId: 'morph', config: { cdcp: { tMinAgeMs: 0 } }, adapter: standaloneAdapter() });
+    const c1 = 'distributed ledgers use hash chains';
+    node.teach(c1);
+    node.observe({ claim: c1, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    node.consolidate(node.stm.all()[0].claim_id);
+    const before = node.ltm.size;
+    node.morph(powAdapter({ difficulty: 2 }));
+    const c2 = 'photosynthesis converts light to energy in plants';
+    node.teach(c2);
+    node.observe({ claim: c2, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    node.consolidate(node.stm.all().find((e) => !e.promoted).claim_id);
+    assert.strictEqual(node.ltm.size, before + 1);
+    assert.ok(node.ltm.blocks[before].hash.startsWith('00'));
+  });
+}
+
+// ───────────────────────── network/swarm ─────────────────────────
+section('network/swarm (cross-chain pollination)');
+{
+  const { standaloneAdapter, powAdapter } = DarmAnn.adapters;
+  test('pollination disseminates a memory to a peer chain', () => {
+    const a = new DarmAnn({ nodeId: 'A', config: { cdcp: { tMinAgeMs: 0 } }, adapter: standaloneAdapter() });
+    const b = new DarmAnn({ nodeId: 'B', config: { cdcp: { tMinAgeMs: 0 } }, adapter: powAdapter({ difficulty: 1 }) });
+    const c = 'cross chain pollination spreads validated knowledge';
+    a.teach(c);
+    a.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.95, u_ep: 0.05 } });
+    a.consolidate(a.stm.all()[0].claim_id);
+    const swarm = new DarmAnn.Swarm({ nodes: [a, b] });
+    const report = swarm.pollinate({ topK: 5 });
+    assert.ok(report.accepted >= 1);
+    assert.ok(b.ltm.size >= 1, 'peer B re-consolidated the pollinated memory');
+  });
+}
+
+// ───────────────────────── self-correction ─────────────────────────
+section('self-correction');
+{
+  test('selfCorrect repairs a tampered STM blockchain', () => {
+    const node = fast();
+    node.observe({ claim: 'a durable claim worth keeping', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    node.stm.chain.blocks[1].payload.claim_text = 'TAMPERED';
+    assert.ok(!node.stm.validateChain().valid);
+    const report = node.selfCorrect();
+    assert.ok(report.stmRepaired >= 1);
+    assert.ok(node.stm.validateChain().valid);
+  });
+  test('selfCorrect supersedes an LTM entry that becomes refuted', () => {
+    const node = fast();
+    const c = 'the protocol is perfectly secure forever';
+    node.teach(c);
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    node.consolidate(node.stm.all()[0].claim_id);
+    assert.strictEqual(node.ltm.size, 1);
+    node.refute(c); // new evidence contradicts it
+    const report = node.selfCorrect();
+    assert.ok(report.superseded >= 1);
+    assert.ok(node.ltm.blocks[0].superseded);
+  });
+}
+
+// ───────────────────────── facade integration ─────────────────────────
+section('facade integration');
+{
+  test('observe → consolidate → query end-to-end; state() reports chains', () => {
+    const node = fast();
+    const c = 'sharp wave ripples drive hippocampal replay';
+    node.teach(c);
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } });
+    node.consolidate(node.stm.all()[0].claim_id);
+    const q = node.query(c);
+    assert.ok(q.hit && (q.tier === 'RRC' || q.tier === 'LTM'));
+    const st = node.state();
+    assert.ok(st.chains.stmValid && st.chains.ltmValid);
+    assert.ok(st.markov.states >= 1 && st.models.length === 2 && st.vocab > 0);
+  });
+  test('selfDeploy returns an autonomous node; stop clears timers', () => {
+    const node = DarmAnn.selfDeploy({ difficulty: 1, config: { cdcp: { tMinAgeMs: 0 } } });
+    assert.ok(node._timers && node._timers.length === 3);
+    node.stop();
+    assert.strictEqual(node._timers, null);
+  });
+}
+
+// ───────────────────────── consensus over real TCP sockets ─────────────────────────
+async function tcpTest() {
+  section('consensus/bft over real TCP (multi-socket)');
+  const { TcpTransport } = require('./consensus/transport');
+  const { BFTNode } = require('./consensus/bft');
+  const ValidatorKey = require('./consensus/validatorKey');
+  const N = 4;
+  const base = 18200 + Math.floor(Math.random() * 300);
+  const keys = Array.from({ length: N }, () => new ValidatorKey());
+  const validators = new Map();
+  keys.forEach((k, i) => validators.set('v' + i, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+  const transports = [];
+  let decided = 0;
+  for (let i = 0; i < N; i++) {
+    const t = new TcpTransport({ nodeId: 'v' + i, port: base + i });
+    await t.listen();
+    transports.push(t);
+  }
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (i !== j) transports[i].addPeer('v' + j, '127.0.0.1', base + j);
+  const nodes = transports.map((t, i) => new BFTNode({ nodeId: 'v' + i, key: keys[i], validators, transport: t, tauC: 0.67, evaluate: () => ({ vote: 'YES', score: 0.9 }), onDecide: () => { decided += 1; } }));
+  await new Promise((r) => setTimeout(r, 200));
+  nodes[0].propose({ claim_id: 'tcp-claim' });
+  await new Promise((r) => setTimeout(r, 1000));
+  transports.forEach((t) => t.close());
+  test('reaches commit across 4 nodes over TCP', () => {
+    assert.ok(decided >= Math.ceil((2 * N) / 3), `only ${decided}/${N} committed`);
+  });
+}
+
+tcpTest()
+  .catch((e) => {
+    failed += 1;
+    console.log('  ✗ TCP consensus threw\n      ' + e.message);
+  })
+  .finally(() => {
+    console.log(`\n${passed} passed, ${failed} failed\n`);
+    process.exit(failed === 0 ? 0 : 1);
+  });

@@ -73,4 +73,23 @@ line('swarm growth: ' + JSON.stringify(swarm.growth()));
 rule('5. Associative network growth (Hebbian wiring)');
 line('A associative graph: ' + JSON.stringify(a.ltm.graphStats()));
 
+rule('6. Two memory blockchains + self-correction');
+line(`STM chain height=${node.stm.chain.height}, valid=${node.stm.validateChain().valid}`);
+line(`LTM chain valid=${node.ltm.validate().valid}`);
+node.stm.chain.blocks.length > 1 && (node.stm.chain.blocks[1].payload.claim_text = 'TAMPERED');
+line(`after tampering STM block → valid=${node.stm.validateChain().valid}`);
+const corrected = node.selfCorrect();
+line(`selfCorrect → ${JSON.stringify(corrected)}`);
+line(`STM chain valid again=${node.stm.validateChain().valid}`);
+
+rule('7. Markov chain-graph navigation (TinyLM-directed)');
+const nav = new DarmAnn({ nodeId: 'nav', config: { cdcp: { tMinAgeMs: 0 } } });
+const steps = ['initialise consensus round', 'collect prevotes from validators', 'reach precommit quorum', 'commit block to chain'];
+for (let r = 0; r < 3; r++) for (const s of steps) nav.observe({ claim: s, reward: 0.9, epistemic: { conf_cal: 0.85, u_ep: 0.1 } });
+line('markov graph: ' + JSON.stringify(nav.markov.stats()));
+const navigation = nav.navigate('initialise consensus round', 5);
+line('model-directed path:');
+navigation.path.forEach((p, i) => line(`  ${i}. ${p}`));
+line('models held: ' + nav.registry.list().map((m) => m.name).join(', '));
+
 line('\nDone.\n');

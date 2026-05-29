@@ -2,6 +2,7 @@
 
 const { LSHIndex } = require('../util/lsh');
 const { cosineSimilarity } = require('../util/embedding');
+const Chain = require('./chain');
 
 /**
  * Tier 2 — Short-Term Memory (STM), paper §3.4.
@@ -32,6 +33,9 @@ class ShortTermMemory {
     this.capacity = capacity;
     this.byId = new Map(); // claim_id -> entry
     this.index = new LSHIndex({ dim, tables: 3, bits: 16, seed: 0x57a2 });
+    // Short-term memory blockchain: an append-only, hash-linked, tamper-evident
+    // log of every STM commitment (the "short-term memory blockchain").
+    this.chain = new Chain({ name: 'stm', difficulty: 0 });
   }
 
   get size() {
@@ -49,7 +53,32 @@ class ShortTermMemory {
   insert(entry) {
     this.byId.set(entry.claim_id, entry);
     this.index.insert(entry.claim_id, entry.embedding, null);
+    // Commit to the short-term blockchain (tamper-evident ordered record).
+    this.chain.append({ claim_id: entry.claim_id, claim_text: entry.claim_text, created_at: entry.created_at, expires_at: entry.expires_at });
     return entry;
+  }
+
+  /** Validate the short-term blockchain (self-diagnosis). */
+  validateChain() {
+    return this.chain.validate();
+  }
+
+  /** Self-correct the short-term blockchain by rebuilding broken links. */
+  repairChain() {
+    return this.chain.repair();
+  }
+
+  /** TTL self-maintenance: drop expired entries from the active store + chain. */
+  pruneExpired(now = Date.now()) {
+    let removed = 0;
+    for (const e of this.all()) {
+      if (e.expires_at && e.expires_at <= now && !e.promoted) {
+        this.expire(e.claim_id);
+        removed += 1;
+      }
+    }
+    this.chain.prune((p) => p.expires_at && p.expires_at <= now);
+    return removed;
   }
 
   /** Nearest neighbour by cosine similarity over the LSH candidate set. */

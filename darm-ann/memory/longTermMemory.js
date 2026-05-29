@@ -222,6 +222,28 @@ class LongTermMemory {
     return null;
   }
 
+  /** Validate the long-term blockchain's hash-link continuity. */
+  validate() {
+    for (let i = 1; i < this.blocks.length; i++) {
+      if (this.blocks[i].previousHash !== this.blocks[i - 1].hash) {
+        return { valid: false, brokenAt: i, reason: 'broken link' };
+      }
+    }
+    return { valid: true, brokenAt: -1 };
+  }
+
+  /** Self-correct hash-link pointers (best-effort: re-links previousHash). */
+  repairLinks() {
+    let repaired = 0;
+    for (let i = 1; i < this.blocks.length; i++) {
+      if (this.blocks[i].previousHash !== this.blocks[i - 1].hash) {
+        this.blocks[i].previousHash = this.blocks[i - 1].hash;
+        repaired += 1;
+      }
+    }
+    return repaired;
+  }
+
   /** Top-K blocks by historical access (RRC replay warm-up, §7.4). */
   topByAccess(k = 10000) {
     return [...this.blocks]

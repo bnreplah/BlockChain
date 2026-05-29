@@ -1,7 +1,6 @@
 'use strict';
 
 const DarmAnn = require('../index');
-const { embed } = require('../util/embedding');
 
 /**
  * Swarm — cross-chain dissemination, pollination & poly-chain morphism.
@@ -64,7 +63,7 @@ class Swarm {
         if (peer === source) continue;
         for (const mem of memories) {
           report.offered += 1;
-          const e = embed(mem.claim_text, peer.cfg.embeddingDim);
+          const e = peer.embedText(mem.claim_text);
           if (peer.ltm.contains(e, 0.97)) continue; // already known on this chain
           // Ground it in the peer's voters and stage it for independent re-validation.
           peer.teach(mem.claim_text);

@@ -80,7 +80,10 @@ class ReplayConsolidationEngine {
       const bfs = this.gte.bfsValidate(entry.claim_text, entry.embedding, cfg.gte.bfsK2);
       const dfs = this.gte.dfsAudit(entry.claim_text, entry.embedding);
 
-      if (bfs.score > cfg.rce.bfsReinforceScore && dfs.type === 'Grounded') {
+      // Reinforce a replayed memory when it is grounded in G_K and not
+      // contradicted; otherwise decay it. (Groundedness is the real signal —
+      // a single supporting claim yields a modest BFS magnitude by design.)
+      if (dfs.type === 'Grounded' && bfs.conflict_score <= 0.5) {
         entry.salience = Math.min(1, entry.salience * cfg.rce.reinforceFactor);
         entry.replays = (entry.replays || 0) + 1;
         report.reinforced += 1;

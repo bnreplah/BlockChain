@@ -1,9 +1,9 @@
 'use strict';
 
 const { DEFAULT_CONFIG } = require('./config');
-const { embed, cosineSimilarity } = require('./util/embedding');
+const { cosineSimilarity } = require('./util/embedding');
 
-const WorkingMemory = require('./memory/workingMemory');
+const Embedder = require('./nn/embedder');
 const EpisodicBuffer = require('./memory/episodicBuffer');
 const ShortTermMemory = require('./memory/shortTermMemory');
 const LongTermMemory = require('./memory/longTermMemory');
@@ -15,8 +15,17 @@ const BVAS = require('./engine/bvas');
 const ReplayConsolidationEngine = require('./engine/rce');
 
 const CDCP = require('./consensus/cdcp');
+const ValidatorKey = require('./consensus/validatorKey');
 const { memoryEncode, stmPersist } = require('./pipeline/memoryFormation');
 const { memoryTriage } = require('./pipeline/triage');
+
+const MarkovGraph = require('./markov/markovGraph');
+const GraphNavigator = require('./markov/navigator');
+const TinyLM = require('./nn/tinyLM');
+const NgramLM = require('./nn/ngramLM');
+const ModelRegistry = require('./nn/modelRegistry');
+
+const crypto = require('crypto');
 
 /** Deep-merge user config over defaults (one level of nesting is enough here). */
 function mergeConfig(base, override) {
@@ -31,21 +40,22 @@ function mergeConfig(base, override) {
   return out;
 }
 
+const stateId = (text) => 'st:' + crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+
 /**
  * DARM-ANN v6.0 — node facade.
  *
- * Wires the five-tier memory hierarchy (WM → EB → STM → LTM → RRC) together
- * with the GTE, ESE, BVAS, CDCP, and RCE, and exposes the end-to-end memory
- * flow of §9.4 / §11:
- *
- *   observe(...)  →  encode to EB  →  persist to STM
- *   query(...)    →  RRC → STM → LTM → MISS   (short-circuits at first hit)
- *   replay()      →  RCE cycle (nominates survivors to CDCP → LTM commit)
- *   triage()      →  STM lifecycle management
- *
- * Fully self-contained: no Redis, no external LLM, no external consensus
- * service. An optional repo Blockchain instance can be bridged in as the LTM
- * substrate so the existing PoW chain literally *is* the long-term memory.
+ * Production-ready, fully self-contained, zero external services. Every
+ * component is a real implementation built in this repo:
+ *   • Embedder        — skip-gram neural embeddings (nn/embedder.js)
+ *   • STM / LTM       — hash-linked blockchains (memory/chain.js)
+ *   • GTE             — real graph traversal over a knowledge graph
+ *   • ESE             — deep-ensemble classifiers + temperature scaling
+ *   • BVAS            — real 5-stage validity pipeline w/ Ed25519 verification
+ *   • CDCP            — signed BFT consensus rounds (consensus/bft.js)
+ *   • Markov graph    — weighted transition graph + link-chain overlay
+ *   • TinyLM / SLM    — neural transition scorer + n-gram LM, model registry
+ *   • Navigator       — model-directed traversal of the chain graph
  */
 class DarmAnn {
   constructor(opts = {}) {
@@ -53,63 +63,44 @@ class DarmAnn {
     this.cfg = mergeConfig(DEFAULT_CONFIG, opts.config);
     const dim = this.cfg.embeddingDim;
 
-    // ── Memory tiers ──────────────────────────────────────────────────────
-    this.ltm = new LongTermMemory({
-      dim,
-      chain: opts.chain || null,
-      adapter: opts.adapter || null, // poly-chain morphism substrate
-      nodeId: this.nodeId,
-    });
+    // ── Shared learned embedder (the ANN producing representations) ─────────
+    this.embedder = opts.embedder || new Embedder({ dim, seed: opts.seed || 12345 });
+
+    // ── Memory tiers (STM + LTM are blockchains) ───────────────────────────
+    this.ltm = new LongTermMemory({ dim, chain: opts.chain || null, adapter: opts.adapter || null, nodeId: this.nodeId });
     this.stm = new ShortTermMemory({ capacity: this.cfg.stm.capacity, dim });
-    this.rrc = new RapidRetrievalCache({
-      dim,
-      capacity: this.cfg.rrc.capacity,
-      tables: this.cfg.rrc.lshTables,
-      bits: this.cfg.rrc.lshBits,
-      simThreshold: this.cfg.rrc.simThreshold,
-    });
-    this.episodicBuffers = new Map(); // agentId -> EpisodicBuffer
+    this.rrc = new RapidRetrievalCache({ dim, capacity: this.cfg.rrc.capacity, tables: this.cfg.rrc.lshTables, bits: this.cfg.rrc.lshBits, simThreshold: this.cfg.rrc.simThreshold });
+    this.episodicBuffers = new Map();
 
-    // ── Reasoning / validity engines (self node) ──────────────────────────
-    this.gte = new GraphTraversalEngine({ dim, ltm: this.ltm });
-    this.ese = new EpistemicSkepticismEngine({ dim, gte: this.gte });
-    this.bvas = new BVAS({ ltm: this.ltm });
+    // ── Validity engines (self node) ───────────────────────────────────────
+    this.gte = new GraphTraversalEngine({});
+    this.ese = new EpistemicSkepticismEngine({ embedder: this.embedder, dim, seed: 1 });
+    this.bvas = new BVAS({ ltm: this.ltm, thetaConf: this.cfg.ese.thetaConf });
 
-    // ── CDCP voters: self + synthetic peers (self-contained quorum) ───────
-    this.self = new CDCP.Validator({ nodeId: this.nodeId, gte: this.gte, ese: this.ese, stm: this.stm });
+    // ── CDCP voters: self + peers, each with a real keypair (signed BFT) ────
+    this.self = new CDCP.Validator({ nodeId: this.nodeId, gte: this.gte, ese: this.ese, key: new ValidatorKey() });
     this.peers = this._buildPeers(opts.peers, dim);
-    this.cdcp = new CDCP({
-      self: this.self,
-      peers: this.peers,
-      ltm: this.ltm,
-      rrc: this.rrc,
-      stm: this.stm,
-      bvas: this.bvas,
-      cfg: this.cfg,
-    });
+    this.cdcp = new CDCP({ self: this.self, peers: this.peers, ltm: this.ltm, rrc: this.rrc, stm: this.stm, bvas: this.bvas, cfg: this.cfg, embedder: this.embedder });
 
-    // ── Replay engine ─────────────────────────────────────────────────────
-    this.rce = new ReplayConsolidationEngine({
-      stm: this.stm,
-      ltm: this.ltm,
-      rrc: this.rrc,
-      gte: this.gte,
-      cdcp: this.cdcp,
-      cfg: this.cfg,
-    });
+    // ── Replay engine ───────────────────────────────────────────────────────
+    this.rce = new ReplayConsolidationEngine({ stm: this.stm, ltm: this.ltm, rrc: this.rrc, gte: this.gte, cdcp: this.cdcp, cfg: this.cfg });
+
+    // ── Markov chain-graph + the SLM/TinyLMs that navigate it ──────────────
+    this.markov = new MarkovGraph();
+    this.tinyLM = new TinyLM({ embedder: this.embedder, dim, seed: 5 });
+    this.ngram = new NgramLM({ n: 2 });
+    this.registry = new ModelRegistry();
+    this.registry.register('tinyLM-transition', this.tinyLM, { kind: 'tinyLM', tags: ['navigation', 'transition'] });
+    this.registry.register('ngram-slm', this.ngram, { kind: 'slm', tags: ['sequence', 'likelihood'] });
+    this._stateText = new Map(); // stateId -> text label
+    this.navigator = new GraphNavigator({ graph: this.markov, tinyLM: this.tinyLM, labelOf: (id) => this._stateText.get(id) || id });
+    this._lastStateId = null;
 
     this._maxReward = 1;
   }
 
-  /**
-   * Build synthetic peer validators so a single process forms a real τ_c
-   * quorum. Each peer owns its own GTE over the shared LTM plus an optional
-   * private seed set, which lets deployments tune cross-node correlation ρ_GK
-   * (Proof P39): more private knowledge → lower ρ_GK → tighter hallucination
-   * bound.
-   */
   _buildPeers(peers, dim) {
-    let count = 6; // default → 7-node cluster (self + 6), matches paper examples
+    let count = 6;
     let seeds = [];
     if (typeof peers === 'number') count = peers;
     else if (Array.isArray(peers)) {
@@ -118,29 +109,37 @@ class DarmAnn {
     }
     const out = [];
     for (let i = 0; i < count; i++) {
-      const gte = new GraphTraversalEngine({ dim, ltm: this.ltm });
+      const gte = new GraphTraversalEngine({});
+      const ese = new EpistemicSkepticismEngine({ embedder: this.embedder, dim, seed: 100 + i });
       const seed = seeds[i];
-      if (seed && Array.isArray(seed.grounded)) seed.grounded.forEach((t) => gte.addGrounded(t));
-      if (seed && Array.isArray(seed.refuted)) seed.refuted.forEach((t) => gte.addRefuted(t));
-      const ese = new EpistemicSkepticismEngine({ dim, gte });
-      out.push(new CDCP.Validator({ nodeId: `${this.nodeId}-peer-${i}`, gte, ese }));
+      if (seed && Array.isArray(seed.grounded)) seed.grounded.forEach((t) => { gte.addGrounded(t); ese.addExample(t, 1); });
+      if (seed && Array.isArray(seed.refuted)) seed.refuted.forEach((t) => { gte.addRefuted(t); ese.addExample(t, 0); });
+      out.push(new CDCP.Validator({ nodeId: `${this.nodeId}-peer-${i}`, gte, ese, key: new ValidatorKey() }));
     }
     return out;
   }
 
-  // ── Knowledge seeding (every validator's G_K) ─────────────────────────────
+  embedText(text) {
+    return this.embedder.embed(text);
+  }
 
-  /** Teach a grounded fact to the whole cluster (raises support during votes). */
+  // ── Knowledge seeding across the whole cluster (G_K + ESE corpus) ─────────
   teach(text) {
-    this.gte.addGrounded(text);
-    for (const p of this.peers) p.gte.addGrounded(text);
+    this.embedder.observe(text);
+    for (const v of this.cdcp.voters) {
+      v.gte.addGrounded(text);
+      v.ese.addExample(text, 1);
+    }
+    this.ngram.train(text);
     return this;
   }
 
-  /** Mark a claim as refuted across the cluster (raises conflict during votes). */
   refute(text) {
-    this.gte.addRefuted(text);
-    for (const p of this.peers) p.gte.addRefuted(text);
+    this.embedder.observe(text);
+    for (const v of this.cdcp.voters) {
+      v.gte.addRefuted(text);
+      v.ese.addExample(text, 0);
+    }
     return this;
   }
 
@@ -151,129 +150,150 @@ class DarmAnn {
     return this.episodicBuffers.get(agentId);
   }
 
-  /** access_frequency proxy (§4.2): how recurrent is this claim in STM? */
   _accessFreq(embedding) {
     const similar = this.stm.retrieveSimilar(embedding, 5).filter((s) => s.similarity > 0.5);
     return Math.min(1, similar.length / 5);
   }
 
-  /**
-   * observe — ingest a completed inference (WM → EB → STM).
-   * @param {{claim?, claims?, output?, reward?, epistemic?, agentId?, cot?}} obs
-   */
+  /** Record a claim into the Markov chain-graph + train the navigating models. */
+  _updateChainGraph(text) {
+    const id = stateId(text);
+    this._stateText.set(id, text);
+    this.markov.visit(id, text);
+    this.ngram.train(text);
+    if (this._lastStateId && this._lastStateId !== id) {
+      this.tinyLM.observeTransition(this._stateText.get(this._lastStateId), text);
+    }
+    this._lastStateId = id;
+    return id;
+  }
+
+  /** observe — ingest a completed inference (WM → EB → STM). */
   observe(obs = {}) {
     const agentId = obs.agentId || 'agent-0';
     const eb = this._eb(agentId);
     const reward = obs.reward != null ? obs.reward : 0.5;
     this._maxReward = Math.max(this._maxReward, reward);
-    const epistemic = obs.epistemic || { conf_cal: 0.8, u_ep: 0.1 };
+    const text = obs.output || obs.claim || (Array.isArray(obs.claims) ? obs.claims[0] : '');
+    if (text) this.embedder.observe(text);
+    const epistemic = obs.epistemic || (this.ese.examples.length ? this.ese.assess(text) : { conf_cal: 0.8, u_ep: 0.1 });
     const cot = obs.cot || { trace_id: `t-${Date.now()}`, claims: obs.claims, claim: obs.claim };
 
     const enc = memoryEncode(
       { cot, output: obs.output || obs.claim, reward, epistemic },
-      { eb, stm: this.stm, cfg: this.cfg, maxReward: this._maxReward, accessFreq: (e) => this._accessFreq(e) }
+      { eb, stm: this.stm, cfg: this.cfg, embedder: this.embedder, maxReward: this._maxReward, accessFreq: (e) => this._accessFreq(e) }
     );
 
     const persisted = [];
     for (const ebEntry of enc.created) {
-      const res = stmPersist(ebEntry, {
-        stm: this.stm,
-        gte: this.gte,
-        cfg: this.cfg,
-        nodeId: this.nodeId,
-      });
+      const res = stmPersist(ebEntry, { stm: this.stm, gte: this.gte, cfg: this.cfg, nodeId: this.nodeId });
       persisted.push(res);
     }
+    if (text) this._updateChainGraph(text);
     return { encoded: enc.encoded, persisted };
   }
 
-  /**
-   * query — retrieve via the memory hierarchy in priority order (§9.4).
-   * Returns { tier, hit, ... }. Short-circuits at the first successful hit.
-   */
+  /** query — retrieve via the memory hierarchy (RRC → STM → LTM → MISS). */
   query(text) {
-    const embedding = embed(text, this.cfg.embeddingDim);
-
-    // 1. RRC (~2ms, pre-computed)
+    const embedding = this.embedder.embed(text);
     const rrc = this.rrc.query(embedding);
     if (rrc) return { tier: 'RRC', hit: true, ...rrc };
 
-    // 2. STM (~2ms, node-local)
     const stmHit = this.stm.nearestNeighbor(embedding);
     if (stmHit && stmHit.similarity >= this.cfg.rrc.simThreshold) {
-      return {
-        tier: 'STM',
-        hit: true,
-        result: stmHit.entry.claim_text,
-        confidence: stmHit.entry.confidence,
-        similarity: stmHit.similarity,
-      };
+      return { tier: 'STM', hit: true, result: stmHit.entry.claim_text, confidence: stmHit.entry.confidence, similarity: stmHit.similarity };
     }
 
-    // 3. LTM (~5ms, blockchain LSH)
     const ltmHit = this.ltm.query(embedding, this.cfg.rrc.simThreshold);
     if (ltmHit) {
-      // back-populate RRC if confidently consolidated (§7.4 query-driven warm-up)
       if (ltmHit.block.confidence >= this.cfg.ese.thetaConf) this.rrc.indexBlock(ltmHit.block);
-      return {
-        tier: 'LTM',
-        hit: true,
-        result: ltmHit.block.claim_text,
-        confidence: ltmHit.block.confidence,
-        similarity: ltmHit.similarity,
-        source: ltmHit.block.hash,
-      };
+      return { tier: 'LTM', hit: true, result: ltmHit.block.claim_text, confidence: ltmHit.block.confidence, similarity: ltmHit.similarity, source: ltmHit.block.hash };
     }
-
-    // 4. MISS — caller would fall through to full inference + GTE
     return { tier: 'MISS', hit: false };
   }
 
-  /** Run one RCE replay/consolidation cycle (§6). */
+  /** Navigate the chain graph from a starting claim, model-directed. */
+  navigate(startText, steps = 8) {
+    const start = stateId(startText);
+    if (!this._stateText.has(start)) this._stateText.set(start, startText);
+    const { path, trace } = this.navigator.navigate(start, steps);
+    return { path: path.map((id) => this._stateText.get(id) || id), trace };
+  }
+
   replay(opts) {
     return this.rce.cycle(opts);
   }
 
-  /** Run STM triage (§8.2). */
   triage(opts = {}) {
     return memoryTriage({ stm: this.stm, cdcp: this.cdcp, cfg: this.cfg, now: opts.now });
   }
 
-  /** Force a consolidation attempt for a specific STM entry (testing / API). */
   consolidate(claimId) {
     const entry = this.stm.get(claimId);
     if (!entry) return { status: 'NOT_FOUND' };
     return this.cdcp.runConsensus(entry);
   }
 
-  /** Morph the LTM substrate at runtime (poly-chain morphism). */
   morph(adapter) {
     this.ltm.morph(adapter);
     return this;
   }
 
   /**
-   * Self-deploying autonomous operation: run RCE replay and STM triage on
-   * background timers so the node keeps consolidating and pruning on its own,
-   * with zero external schedulers. Fully self-contained. Returns this.
+   * Self-correcting maintenance pass. Detects and repairs inconsistencies:
+   *   • repairs the STM and LTM blockchains if any hash link is broken
+   *   • prunes expired STM entries (TTL)
+   *   • supersedes LTM entries now contradicted by the knowledge graph
+   *   • retrains ESE on the current corpus (recalibration)
    */
-  autorun({ replayMs = 5 * 60 * 1000, triageMs = 30 * 60 * 1000 } = {}) {
+  selfCorrect({ now = Date.now() } = {}) {
+    const report = { stmRepaired: 0, ltmRepaired: 0, stmPruned: 0, superseded: 0, eseRetrained: false };
+
+    const stmStatus = this.stm.validateChain();
+    if (!stmStatus.valid) report.stmRepaired = this.stm.repairChain();
+
+    const ltmStatus = this.ltm.validate();
+    if (!ltmStatus.valid) report.ltmRepaired = this.ltm.repairLinks();
+
+    report.stmPruned = this.stm.pruneExpired(now);
+
+    // Contradiction-driven self-correction: if a committed claim is now refuted
+    // by the self node's knowledge graph, supersede it (retrograde protection).
+    for (const block of this.ltm.blocks) {
+      if (block.superseded) continue;
+      const bfs = this.gte.bfsValidate(block.claim_text, block.embedding, this.cfg.gte.bfsK2);
+      // Supersede when contradiction outweighs support (a single refuter scores
+      // ~0.39 by the BFS depth discount, so gate on relative magnitude).
+      if (bfs.conflict_score > 0.2 && bfs.conflict_score > bfs.score) {
+        this.ltm.markSuperseded(block.hash, null);
+        this.rrc.invalidate(block.hash);
+        report.superseded += 1;
+      }
+    }
+
+    if (this.ese.dirty) {
+      this.ese.trainIfDirty();
+      report.eseRetrained = true;
+    }
+    return report;
+  }
+
+  autorun({ replayMs = 5 * 60 * 1000, triageMs = 30 * 60 * 1000, correctMs = 15 * 60 * 1000 } = {}) {
     this.stop();
     this._timers = [];
     this._timers.push(setInterval(() => this.replay(), replayMs));
     this._timers.push(setInterval(() => this.triage(), triageMs));
-    for (const t of this._timers) if (t.unref) t.unref(); // don't hold the event loop
+    this._timers.push(setInterval(() => this.selfCorrect(), correctMs));
+    for (const t of this._timers) if (t.unref) t.unref();
     return this;
   }
 
-  /** Stop background autorun timers. */
   stop() {
     if (this._timers) for (const t of this._timers) clearInterval(t);
     this._timers = null;
     return this;
   }
 
-  /** Σ(t) snapshot — tier occupancies and key counters (§2 state tuple). */
   state() {
     return {
       nodeId: this.nodeId,
@@ -284,18 +304,16 @@ class DarmAnn {
         LTM: this.ltm.size,
         RRC: this.rrc.size,
       },
+      chains: { stmHeight: this.stm.chain.height, stmValid: this.stm.validateChain().valid, ltmValid: this.ltm.validate().valid },
       associativeGraph: this.ltm.graphStats(),
+      markov: this.markov.stats(),
+      models: this.registry.list(),
       cluster: { voters: this.cdcp.voters.length, tauC: this.cfg.cdcp.tauC },
       rrcHitRate: this.rrc.hitRate(),
+      vocab: this.embedder.vocabSize(),
     };
   }
 
-  /**
-   * Self-deploy a fully self-contained, autonomously-running node from
-   * scratch. No Redis / no external LLM / no external consensus service: an
-   * in-process PoW substrate is created by default, background consolidation
-   * is started, and the node is returned ready to observe/query.
-   */
   static selfDeploy(opts = {}) {
     const { powAdapter } = require('./network/chainAdapter');
     const node = new DarmAnn({
@@ -308,9 +326,12 @@ class DarmAnn {
   }
 }
 
-DarmAnn.embed = embed;
 DarmAnn.cosineSimilarity = cosineSimilarity;
 DarmAnn.CDCP = CDCP;
+DarmAnn.Embedder = Embedder;
+DarmAnn.MarkovGraph = MarkovGraph;
+DarmAnn.TinyLM = TinyLM;
+DarmAnn.NgramLM = NgramLM;
 DarmAnn.DEFAULT_CONFIG = DEFAULT_CONFIG;
 module.exports = DarmAnn;
 
