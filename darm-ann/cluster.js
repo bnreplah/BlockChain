@@ -14,10 +14,13 @@
  */
 
 const crypto = require('crypto');
+const os = require('os');
+const path = require('path');
 const { fork } = require('child_process');
 const { TcpTransport } = require('./consensus/transport');
 const { BFTNode } = require('./consensus/bft');
 const ValidatorKey = require('./consensus/validatorKey');
+const WAL = require('./consensus/wal');
 
 function seedFor(master, i) {
   return crypto.createHash('sha256').update(`${master}:${i}`).digest();
@@ -40,6 +43,9 @@ async function runChild(i, n, basePort, master) {
   await transport.listen();
   for (let j = 0; j < n; j++) if (j !== i) transport.addPeer(`v${j}`, '127.0.0.1', basePort + j);
 
+  // Durable consensus WAL per process (crash recovery across restarts).
+  const wal = new WAL(path.join(os.tmpdir(), `darm-wal-${master}-v${i}.log`));
+
   const node = new BFTNode({
     nodeId: `v${i}`,
     key: keys[i],
@@ -48,6 +54,7 @@ async function runChild(i, n, basePort, master) {
     tauC: 0.67,
     useTimers: true,
     timeoutMs: 250,
+    wal,
     evaluate: () => ({ vote: 'YES', score: 0.9 }), // each process votes per its own policy
     onDecide: (res) => {
       console.log(`COMMITTED v${i} round=${res.round} yes=${res.yes.length}`);
@@ -55,6 +62,7 @@ async function runChild(i, n, basePort, master) {
       setTimeout(() => process.exit(0), 900);
     },
   });
+  node.recoverFromWAL(); // resume safely if this process previously crashed
 
   process.send && process.send({ ready: i });
   // Give every process time to bind its listener, then begin the height.

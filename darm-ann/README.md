@@ -96,7 +96,27 @@ node darm-ann/cluster.js 5          # 5 validator processes, real TCP, BFT round
 ```
 
 Each process independently reconstructs the shared validator set from a master
-seed (deterministic Ed25519 keys) and reaches consensus over sockets.
+seed (deterministic Ed25519 keys), keeps a durable **write-ahead log**, and
+reaches consensus over sockets.
+
+### Crash recovery (WAL)
+
+Each validator appends every safety-critical action (round entry, prevote
+choice, precommit/lock, decision) to a **write-ahead log** (`consensus/wal.js`)
+*before* acting. After a crash, `recoverFromWAL()` restores the locked value and
+round so the node cannot equivocate (prevote a conflicting value) on restart.
+
+### Dynamic validator-set membership
+
+Validators can join/leave at runtime; changes apply at the next consolidation
+(epoch boundary), never mid-round, so BFT safety holds. New validators inherit
+the current grounded/refuted knowledge so they vote meaningfully immediately.
+
+```js
+node.addValidator();              // → { nodeId, address, voters, version }
+node.removeValidator(nodeId);     // (cannot remove self)
+node.validators();                // live set used for the next round
+```
 
 ## Persistence & deployment
 
@@ -170,7 +190,28 @@ swarm.pollinate({ strategy: 'top-confidence', topK: 5 });
 
 `POST /darm/observe` · `GET /darm/query?q=` · `POST /darm/teach` ·
 `POST /darm/refute` · `POST /darm/replay` · `POST /darm/triage` ·
-`GET /darm/state`.
+`POST /darm/selfcorrect` · `POST /darm/snapshot` · `GET /darm/navigate?q=` ·
+`GET /darm/state` · `GET /darm/health` · `GET|POST /darm/validators` ·
+`DELETE /darm/validators/:id` · `GET /darm/dashboard` (operator UI).
+
+## Operate it — CLI + dashboard
+
+A built-in operator **dashboard** (no external deps) is served at
+`http://<host>:<port>/darm/dashboard`: live tier/chain/Markov/validator stats,
+and buttons to teach/observe/query/navigate/replay/triage/self-correct/snapshot
+and add/remove validators.
+
+A no-dependency **CLI** drives a running node/cluster:
+
+```bash
+node darm-ann/cli.js --port 3001 state
+node darm-ann/cli.js --port 3001 teach "TLS 1.3 mandates forward secrecy"
+node darm-ann/cli.js --port 3001 observe "TLS 1.3 mandates forward secrecy"
+node darm-ann/cli.js --port 3001 replay
+node darm-ann/cli.js --port 3001 query "TLS 1.3 mandates forward secrecy"
+node darm-ann/cli.js --port 3001 add-validator
+node darm-ann/cli.js --port 3001 validators
+```
 
 ## Configuration
 

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DARM-ANN — Operator Dashboard</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#c9d1d9; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); }
+  .dot.ok { background:var(--ok); }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:18px; max-width:1100px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:#8b949e; margin:0 0 10px; }
+  .stat { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dashed #21262d; }
+  .stat b { color:var(--accent); font-weight:600; }
+  .full { grid-column:1 / -1; }
+  input, textarea, button, select { font:inherit; background:#0d1117; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; }
+  input, textarea { width:100%; margin:4px 0; }
+  button { cursor:pointer; background:#21262d; }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row button { flex:1; }
+  pre { background:#0d1117; border:1px solid var(--line); border-radius:6px; padding:10px; max-height:240px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+  table { width:100%; border-collapse:collapse; }
+  td,th { text-align:left; padding:4px 6px; border-bottom:1px solid #21262d; }
+  .muted { color:#8b949e; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="health-dot"></span>
+  <h1>DARM-ANN — Operator Dashboard</h1>
+  <span class="muted" id="node-id"></span>
+  <span class="muted" id="ltm-mode" style="margin-left:auto"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Memory tiers (Σ)</h2>
+    <div id="tiers"></div>
+  </section>
+  <section class="panel">
+    <h2>Chains &amp; graphs</h2>
+    <div id="chains"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Teach / Observe</h2>
+    <textarea id="claim" rows="2" placeholder="claim text…"></textarea>
+    <div class="row">
+      <button onclick="act('teach')">Teach (ground)</button>
+      <button onclick="act('refute')">Refute</button>
+      <button onclick="observe()">Observe</button>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Query / Navigate</h2>
+    <textarea id="q" rows="2" placeholder="query text…"></textarea>
+    <div class="row">
+      <button onclick="query()">Query (RRC→STM→LTM)</button>
+      <button onclick="navigate()">Navigate chain-graph</button>
+    </div>
+  </section>
+
+  <section class="panel full">
+    <h2>Operations</h2>
+    <div class="row">
+      <button onclick="post('/darm/replay')">Replay (RCE)</button>
+      <button onclick="post('/darm/triage')">Triage</button>
+      <button onclick="post('/darm/selfcorrect')">Self-correct</button>
+      <button onclick="post('/darm/snapshot')">Snapshot</button>
+      <button onclick="post('/darm/validators')">Add validator</button>
+      <button onclick="refresh()">Refresh</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Validators <span class="muted" id="mver"></span></h2>
+    <table id="validators"><tbody></tbody></table>
+  </section>
+  <section class="panel">
+    <h2>Models held</h2>
+    <div id="models"></div>
+  </section>
+
+  <section class="panel full">
+    <h2>Last response</h2>
+    <pre id="out">—</pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const show = (o) => { $('out').textContent = typeof o === 'string' ? o : JSON.stringify(o, null, 2); };
+async function getJSON(u){ const r = await fetch(u); return r.json(); }
+async function postJSON(u, body){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
+
+async function act(kind){
+  const claim = $('claim').value.trim(); if(!claim) return;
+  show(await postJSON('/darm/'+kind, {claim}));
+  refresh();
+}
+async function observe(){
+  const claim = $('claim').value.trim(); if(!claim) return;
+  show(await postJSON('/darm/observe', {claim, reward:1, epistemic:{conf_cal:0.9,u_ep:0.08}}));
+  refresh();
+}
+async function query(){ const q=$('q').value.trim(); if(!q) return; show(await getJSON('/darm/query?q='+encodeURIComponent(q))); }
+async function navigate(){ const q=$('q').value.trim(); if(!q) return; show(await getJSON('/darm/navigate?q='+encodeURIComponent(q)+'&steps=6')); }
+async function post(u){ show(await postJSON(u)); refresh(); }
+
+function statRow(k,v){ return '<div class="stat"><span>'+k+'</span><b>'+v+'</b></div>'; }
+
+async function refresh(){
+  try {
+    const st = await getJSON('/darm/state');
+    const h = await getJSON('/darm/health');
+    $('health-dot').className = 'dot' + (h.status==='ok' ? ' ok' : '');
+    $('node-id').textContent = (st.nodeId||'').slice(0,16) + '…';
+    $('ltm-mode').textContent = 'substrate: ' + st.ltmMode;
+    $('tiers').innerHTML = Object.entries(st.tiers).map(([k,v])=>statRow(k,v)).join('')
+      + statRow('RRC hit-rate', (st.rrcHitRate*100).toFixed(1)+'%')
+      + statRow('vocab', st.vocab);
+    $('chains').innerHTML =
+      statRow('STM chain height', st.chains.stmHeight)
+      + statRow('STM chain valid', st.chains.stmValid)
+      + statRow('LTM chain valid', st.chains.ltmValid)
+      + statRow('LTM assoc edges', st.associativeGraph.edges)
+      + statRow('Markov states', st.markov.states)
+      + statRow('Markov edges', st.markov.edges)
+      + statRow('τ_c quorum', st.cluster.tauC);
+    $('mver').textContent = 'v' + st.cluster.membershipVersion;
+    $('models').innerHTML = (st.models||[]).map(m=>statRow(m.name, m.kind)).join('');
+    const vs = await getJSON('/darm/validators');
+    $('validators').querySelector('tbody').innerHTML =
+      '<tr><th>node</th><th>weight</th><th></th></tr>' +
+      vs.validators.map(v=>'<tr><td>'+v.nodeId+(v.self?' <span class="muted">(self)</span>':'')+'</td><td>'+v.weight.toFixed(3)+'</td><td>'+
+        (v.self?'':'<button onclick="rm(\''+v.nodeId+'\')">remove</button>')+'</td></tr>').join('');
+  } catch(e){ show('refresh error: '+e.message); }
+}
+async function rm(id){ show(await fetch('/darm/validators/'+encodeURIComponent(id),{method:'DELETE'}).then(r=>r.json())); refresh(); }
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

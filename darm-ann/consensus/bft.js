@@ -23,7 +23,7 @@ const ValidatorKey = require('./validatorKey');
  *   • asynchronous (TCP): real setTimeout timers (enable with useTimers:true).
  */
 class BFTNode {
-  constructor({ nodeId, key, validators, transport, tauC = 0.67, evaluate, onDecide, faulty = false, useTimers = false, timeoutMs = 300, maxRounds = null }) {
+  constructor({ nodeId, key, validators, transport, tauC = 0.67, evaluate, onDecide, faulty = false, useTimers = false, timeoutMs = 300, maxRounds = null, wal = null, height = 0 }) {
     this.nodeId = nodeId;
     this.key = key;
     this.validators = validators;
@@ -34,11 +34,42 @@ class BFTNode {
     this.faulty = faulty; // simulate a silent/crashed leader (for rotation tests)
     this.useTimers = useTimers;
     this.timeoutMs = timeoutMs;
+    this.wal = wal; // optional write-ahead log for crash recovery
+    this.height = height;
     this.validatorIds = [...validators.keys()].sort();
     this.maxRounds = maxRounds || this.validatorIds.length + 2;
     this.totalWeight = [...validators.values()].reduce((s, v) => s + v.weight, 0) || 1;
     this.transport.connect(nodeId, (msg) => this.handle(msg));
     this._resetHeight();
+  }
+
+  _log(entry) {
+    if (this.wal) this.wal.append({ ...entry, height: this.height, node: this.nodeId });
+  }
+
+  /**
+   * Recover consensus state from the WAL after a crash/restart. Restores the
+   * locked value, current round, and which rounds were already prevoted/
+   * precommitted so the node never equivocates post-recovery.
+   */
+  recoverFromWAL() {
+    if (!this.wal) return { recovered: false };
+    let maxRound = -1;
+    for (const e of this.wal.replay()) {
+      if (e.node !== this.nodeId || (e.height != null && e.height !== this.height)) continue;
+      if (e.t === 'ENTER') maxRound = Math.max(maxRound, e.round);
+      if (e.t === 'PREVOTE') this._r(e.round).prevoted = true;
+      if (e.t === 'PRECOMMIT') {
+        this._r(e.round).precommitted = true;
+        if (e.choice === 'value') this.locked = { round: e.round };
+      }
+      if (e.t === 'DECIDE') this.decided = true;
+    }
+    if (maxRound >= 0) {
+      this.round = maxRound;
+      this.step = 'precommit';
+    }
+    return { recovered: maxRound >= 0 || this.decided, round: this.round, locked: !!this.locked, decided: this.decided };
   }
 
   _resetHeight() {
@@ -75,6 +106,7 @@ class BFTNode {
     if (this.decided || round > this.maxRounds) return;
     this.round = round;
     this.step = 'propose';
+    this._log({ t: 'ENTER', round });
     const rs = this._r(round);
     if (this.proposerFor(round) === this.nodeId && !this.faulty) {
       const value = this.value;
@@ -134,6 +166,7 @@ class BFTNode {
     if (rs.prevoted) return;
     rs.prevoted = true;
     this.step = 'prevote';
+    // Choice is logged after it is computed (just below) — see _log call.
 
     // Locked nodes keep prevoting the value (safety); otherwise evaluate.
     let choice = 'nil';
@@ -144,6 +177,7 @@ class BFTNode {
       voteObj = { claim_id: this.value.claim_id, node_id: this.nodeId, vote: 'YES', vote_score: verdict.score, publicKey: this.key.publicKeyB64 };
       voteObj.signature = this.key.sign(BVAS.canonicalVoteBytes(voteObj));
     }
+    this._log({ t: 'PREVOTE', round, choice });
     this._send({ type: 'PREVOTE', round, claim_id: this.value.claim_id, from: this.nodeId, choice, vote: voteObj });
     this._arm('prevote');
   }
@@ -170,6 +204,7 @@ class BFTNode {
     rs.precommitted = true;
     this.step = 'precommit';
     if (choice === 'value') this.locked = { round }; // lock on the value
+    this._log({ t: 'PRECOMMIT', round, choice }); // durable before broadcasting
     this._send({ type: 'PRECOMMIT', round, claim_id: this.value.claim_id, from: this.nodeId, choice, sig: this.key.sign(this._precommitBytes(round, choice)) });
     this._arm('precommit');
   }
@@ -192,6 +227,7 @@ class BFTNode {
     if (valueW / this.totalWeight >= this.tauC) {
       this.decided = true;
       if (this._timer) clearTimeout(this._timer);
+      this._log({ t: 'DECIDE', round: msg.round, claim_id: msg.claim_id });
       const yes = [...rs.prevotes.values()].filter((p) => p !== 'nil');
       if (this.onDecide) this.onDecide({ committed: true, yes, claim_id: msg.claim_id, round: msg.round });
     }

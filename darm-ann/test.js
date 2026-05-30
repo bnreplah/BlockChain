@@ -555,6 +555,63 @@ section('self-correction');
   });
 }
 
+// ───────────────────────── consensus WAL (crash recovery) ─────────────────────────
+section('consensus/wal (crash recovery)');
+{
+  const WAL = require('./consensus/wal');
+  const { InProcessBus } = require('./consensus/transport');
+  const { BFTNode } = require('./consensus/bft');
+  const ValidatorKey = require('./consensus/validatorKey');
+  test('WAL append + replay round-trips', () => {
+    const w = new WAL();
+    w.append({ t: 'ENTER', round: 0 });
+    w.append({ t: 'PRECOMMIT', round: 0, choice: 'value' });
+    assert.strictEqual(w.replay().length, 2);
+    assert.strictEqual(w.replay()[1].choice, 'value');
+  });
+  test('recovers a lock from WAL → will not equivocate after restart', () => {
+    const key = new ValidatorKey();
+    const validators = new Map([['v0', { publicKeyB64: key.publicKeyB64, weight: 1 }]]);
+    const wal = new WAL();
+    // Simulate a pre-crash node that entered round 0 and precommitted the value.
+    wal.append({ t: 'ENTER', round: 0, height: 0, node: 'v0' });
+    wal.append({ t: 'PREVOTE', round: 0, height: 0, node: 'v0', choice: 'value' });
+    wal.append({ t: 'PRECOMMIT', round: 0, height: 0, node: 'v0', choice: 'value' });
+    // Restart: a fresh node whose policy would now vote NO.
+    const node = new BFTNode({ nodeId: 'v0', key, validators, transport: new InProcessBus(), tauC: 0.67, evaluate: () => ({ vote: 'NO', score: 0.1 }), wal });
+    const rec = node.recoverFromWAL();
+    assert.ok(rec.recovered && rec.locked, 'should recover a lock');
+    // Because it is locked, a prevote in a later round must still choose 'value'.
+    node.value = { claim_id: 'tcp' };
+    let sent = null;
+    node.transport.broadcast = (_f, m) => { if (m.type === 'PREVOTE') sent = m.choice; };
+    node.handle = BFTNode.prototype.handle.bind(node);
+    node._doPrevote(1);
+    assert.strictEqual(sent, 'value', 'locked node must keep prevoting value (no equivocation)');
+  });
+}
+
+// ───────────────────────── dynamic validator-set membership ─────────────────────────
+section('dynamic validator-set membership');
+{
+  test('add/remove validators changes the live quorum set; consensus uses it', () => {
+    const node = fast();
+    const c = 'membership changes apply at the next consolidation epoch';
+    node.teach(c);
+    const before = node.cdcp.voters.length;
+    const added = node.addValidator();
+    assert.strictEqual(node.cdcp.voters.length, before + 1);
+    assert.strictEqual(node.cdcp._validatorSet().size, before + 1, 'round uses the new set');
+    const rem = node.removeValidator(added.nodeId);
+    assert.ok(rem.ok && node.cdcp.voters.length === before);
+    assert.ok(node.removeValidator(node.self.nodeId).ok === false, 'cannot remove self');
+    assert.ok(node.state().cluster.membershipVersion >= 2);
+    // Consolidation still works against the (changed) set.
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    assert.strictEqual(node.consolidate(node.stm.all()[0].claim_id).status, 'PROMOTED');
+  });
+}
+
 // ───────────────────────── persistence (deploy / restart) ─────────────────────────
 section('persistence (save / load)');
 {

@@ -254,6 +254,22 @@ app.get("/darm/health", (req, res)=>{
     res.status(healthy ? 200 : 503).json({status: healthy ? "ok" : "degraded", chains: st.chains, tiers: st.tiers});
 });
 
+// validators: dynamic validator-set membership
+app.get("/darm/validators", (req, res)=>{
+    res.json({ validators: darm.validators(), membershipVersion: darm.state().cluster.membershipVersion });
+});
+app.post("/darm/validators", (req, res)=>{
+    res.json(darm.addValidator(req.body || {}));
+});
+app.delete("/darm/validators/:id", (req, res)=>{
+    res.json(darm.removeValidator(req.params.id));
+});
+
+// dashboard: a small operator UI over the endpoints
+app.get(["/darm", "/darm/dashboard"], (req, res)=>{
+    res.sendFile("./darm-ann/dashboard.html", {root: __dirname});
+});
+
 
 //transaction end point
 // adds the transaction that was broadcasted from one of the nodes to the pending transactions upon consensus

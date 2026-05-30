@@ -100,7 +100,48 @@ class DarmAnn {
 
     this._taught = new Set();
     this._refuted = new Set();
+    this._peerSeq = this.peers.length;
+    this._membershipVersion = 0;
+    this._membershipLog = [];
     this._maxReward = 1;
+  }
+
+  // ── Dynamic validator-set membership ──────────────────────────────────────
+  // Changes take effect at the next consolidation (epoch boundary), never
+  // mid-round, so BFT safety is preserved. CDCP snapshots the live voter set
+  // (with G_K-scaled weights) at the start of each round.
+
+  /** Add a validator to the cluster. It inherits current grounded/refuted
+   *  knowledge so it can vote meaningfully from the first round. */
+  addValidator(opts = {}) {
+    const dim = this.cfg.embeddingDim;
+    const gte = new GraphTraversalEngine({});
+    const ese = new EpistemicSkepticismEngine({ embedder: this.embedder, dim, seed: 500 + this._peerSeq });
+    for (const t of this._taught) { gte.addGrounded(t); ese.addExample(t, 1); }
+    for (const t of this._refuted) { gte.addRefuted(t); ese.addExample(t, 0); }
+    const key = opts.seed ? ValidatorKey.fromSeed(Buffer.from(String(opts.seed).padEnd(32, '0')).subarray(0, 32)) : new ValidatorKey();
+    const nodeId = opts.nodeId || `${this.nodeId}-peer-${this._peerSeq++}`;
+    const v = new CDCP.Validator({ nodeId, gte, ese, key });
+    this.peers.push(v);
+    this._membershipVersion += 1;
+    this._membershipLog.push({ op: 'add', nodeId, version: this._membershipVersion, at: Date.now() });
+    return { nodeId, address: key.address, voters: this.cdcp.voters.length, version: this._membershipVersion };
+  }
+
+  /** Remove a validator from the cluster (cannot remove self). */
+  removeValidator(nodeId) {
+    if (nodeId === this.self.nodeId) return { ok: false, reason: 'cannot remove self' };
+    const i = this.peers.findIndex((p) => p.nodeId === nodeId);
+    if (i < 0) return { ok: false, reason: 'not found' };
+    this.peers.splice(i, 1);
+    this._membershipVersion += 1;
+    this._membershipLog.push({ op: 'remove', nodeId, version: this._membershipVersion, at: Date.now() });
+    return { ok: true, voters: this.cdcp.voters.length, version: this._membershipVersion };
+  }
+
+  /** List the current validator set (the set used for the next consolidation). */
+  validators() {
+    return this.cdcp.voters.map((v) => ({ nodeId: v.nodeId, address: v.key.address, weight: v.voteWeight(this.cfg.cdcp.gkThreshold), self: v.nodeId === this.self.nodeId }));
   }
 
   _buildPeers(peers, dim) {
@@ -320,7 +361,7 @@ class DarmAnn {
       associativeGraph: this.ltm.graphStats(),
       markov: this.markov.stats(),
       models: this.registry.list(),
-      cluster: { voters: this.cdcp.voters.length, tauC: this.cfg.cdcp.tauC },
+      cluster: { voters: this.cdcp.voters.length, tauC: this.cfg.cdcp.tauC, membershipVersion: this._membershipVersion },
       rrcHitRate: this.rrc.hitRate(),
       vocab: this.embedder.vocabSize(),
     };
