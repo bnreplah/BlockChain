@@ -118,6 +118,22 @@ node.removeValidator(nodeId);     // (cannot remove self)
 node.validators();                // live set used for the next round
 ```
 
+### Live membership via consensus (replicated state machine)
+
+`consensus/replica.js` is a multi-height RSM over the BFT: each height commits
+one value, and **membership changes are themselves consensus transactions**
+(`add-validator` / `remove-validator`). A committed change mutates the validator
+set for the next height, so a running cluster grows/shrinks live with every
+node agreeing. The ordered log + set are written to the WAL; `recover()` rebuilds
+exact state after a crash, and `compactWAL()` (wired to a state snapshot) trims
+the log safely.
+
+```bash
+node darm-ann/clusterRSM.js 4     # 4 processes; commits a memory txn, then a
+                                  # remove-validator txn → set shrinks 4→3 live
+# → [rsm] result: SUCCESS — set shrank 4 → 3 live via consensus
+```
+
 ## Persistence & deployment
 
 Nodes are restartable. `node.snapshot()` / `node.save(file)` serialise the
@@ -136,6 +152,22 @@ node app.js 3001 http://localhost:3001
 - saves the snapshot on `SIGINT`/`SIGTERM` (graceful shutdown),
 - exposes `GET /darm/health` (liveness/readiness), `GET /darm/navigate`,
   `POST /darm/selfcorrect`, `POST /darm/snapshot` alongside the core endpoints.
+
+### Docker (multi-container cluster + dashboard)
+
+A `Dockerfile` and `docker-compose.yml` (repo root) bring up a three-node
+cluster, each serving its memory network + dashboard with a persistent snapshot
+volume and a `/darm/health` healthcheck:
+
+```bash
+docker compose up --build
+open http://localhost:3001/darm/dashboard      # also :3002, :3003
+docker compose exec darm1 node darm-ann/cli.js state
+```
+
+Each container is an independent DARM-ANN replica (own LTM blockchain); join
+them into one logical network via `Swarm` pollination or the repo's
+`/register-and-broadcast-node` endpoints.
 
 ## Self-correction
 

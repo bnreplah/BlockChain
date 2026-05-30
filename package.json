@@ -13,6 +13,7 @@
     "darm:test": "node ./darm-ann/test.js",
     "darm:demo": "node ./darm-ann/demo.js",
     "darm:cluster": "node ./darm-ann/cluster.js 5",
+    "darm:rsm": "node ./darm-ann/clusterRSM.js 4",
     "darm:serve": "node ./app.js 3001 http://localhost:3001",
     "darm:cli": "node ./darm-ann/cli.js"
   },

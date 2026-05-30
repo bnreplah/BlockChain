@@ -25,8 +25,12 @@ substrate-agnostic, with a self-deploying autonomous mode and a swarm that
 cross-pollinates validated knowledge between heterogeneous chains.
 
 ```bash
-npm run darm:test    # run the DARM-ANN test suite
-npm run darm:demo    # narrated end-to-end demo
+npm run darm:test     # run the DARM-ANN test suite (58 tests)
+npm run darm:demo     # narrated end-to-end demo
+npm run darm:cluster  # multi-process TCP BFT consensus
+npm run darm:rsm      # live validator-set membership change via consensus
+npm run darm:serve    # HTTP node + operator dashboard at /darm/dashboard
+docker compose up --build   # 3-node containerised cluster with dashboards
 ```
 
 ## Run a node

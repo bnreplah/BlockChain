@@ -591,6 +591,92 @@ section('consensus/wal (crash recovery)');
   });
 }
 
+// ───────────────────────── replicated state machine: live membership via consensus ─────────────────────────
+section('consensus/replica (live membership as consensus txns)');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const { Replica, runHeight } = require('./consensus/replica');
+  const ValidatorKey = require('./consensus/validatorKey');
+  const WAL = require('./consensus/wal');
+
+  function makeReplicas(n) {
+    const keys = Array.from({ length: n }, () => new ValidatorKey());
+    const base = new Map();
+    keys.forEach((k, i) => base.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const reps = keys.map((k, i) => new Replica({ nodeId: `v${i}`, key: k, validators: base, tauC: 0.67 }));
+    return { keys, reps };
+  }
+
+  test('cluster grows and shrinks live, with every replica agreeing', () => {
+    const bus = new InProcessBus();
+    const { reps } = makeReplicas(4);
+
+    assert.ok(runHeight(reps, bus, { type: 'memory', claim: 'genesis fact' }).committed);
+    assert.ok(reps.every((r) => r.height === 1 && r.size() === 4));
+
+    // JOIN: a brand-new validator (its own key) added via a consensus txn.
+    const v4 = new ValidatorKey();
+    const join = { type: 'add-validator', nodeId: 'v4', publicKeyB64: v4.publicKeyB64, weight: 1 };
+    assert.ok(runHeight(reps, bus, join).committed);
+    assert.ok(reps.every((r) => r.size() === 5), 'all replicas grew to 5');
+
+    // The new node starts from the agreed state and participates next height.
+    const r4 = new Replica({ nodeId: 'v4', key: v4, validators: reps[0].set, tauC: 0.67 });
+    r4.height = reps[0].height;
+    const all = [...reps, r4];
+    assert.ok(runHeight(all, bus, { type: 'memory', claim: 'post-join fact' }).committed, 'commits with 5 validators');
+    assert.ok(all.every((r) => r.size() === 5 && r.height === 3));
+
+    // LEAVE: remove v4 via consensus.
+    assert.ok(runHeight(all, bus, { type: 'remove-validator', nodeId: 'v4' }).committed);
+    assert.ok(reps.every((r) => r.size() === 4), 'all replicas shrank to 4');
+    // Every replica agrees on the committed log.
+    const ref = JSON.stringify(reps[0].log.map((e) => e.value));
+    assert.ok(reps.every((r) => JSON.stringify(r.log.map((e) => e.value)) === ref), 'logs agree');
+  });
+
+  test('WAL recovery rebuilds replica state after a crash', () => {
+    const bus = new InProcessBus();
+    const keys = Array.from({ length: 4 }, () => new ValidatorKey());
+    const base = new Map();
+    keys.forEach((k, i) => base.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const wals = keys.map(() => new WAL());
+    const reps = keys.map((k, i) => new Replica({ nodeId: `v${i}`, key: k, validators: base, tauC: 0.67, wal: wals[i] }));
+    const v4 = new ValidatorKey();
+    runHeight(reps, bus, { type: 'memory', claim: 'a' });
+    runHeight(reps, bus, { type: 'add-validator', nodeId: 'v4', publicKeyB64: v4.publicKeyB64, weight: 1 });
+    assert.strictEqual(reps[0].height, 2);
+
+    // "Crash" v0 and rebuild from its WAL.
+    const recovered = new Replica({ nodeId: 'v0', key: keys[0], validators: base, tauC: 0.67, wal: wals[0] });
+    const rec = recovered.recover();
+    assert.ok(rec.recovered && recovered.height === 2 && recovered.size() === 5, JSON.stringify(rec));
+  });
+
+  test('WAL compaction (wired to a state snapshot) keeps recovery correct', () => {
+    const bus = new InProcessBus();
+    const keys = Array.from({ length: 4 }, () => new ValidatorKey());
+    const base = new Map();
+    keys.forEach((k, i) => base.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const wal = new WAL();
+    const reps = keys.map((k, i) => new Replica({ nodeId: `v${i}`, key: k, validators: base, tauC: 0.67, wal: i === 0 ? wal : new WAL() }));
+    runHeight(reps, bus, { type: 'memory', claim: 'a' });
+    runHeight(reps, bus, { type: 'memory', claim: 'b' });
+    runHeight(reps, bus, { type: 'memory', claim: 'c' });
+    const before = wal.replay().length;
+    const snap = reps[0].snapshotState();
+    reps[0].compactWAL(); // safe: state is captured by the snapshot
+    assert.ok(wal.replay().length < before, 'WAL shrank after compaction');
+
+    // Restart from snapshot + (compacted) WAL.
+    const r = new Replica({ nodeId: 'v0', key: keys[0], validators: base, tauC: 0.67, wal });
+    r.loadState(snap);
+    r.recover();
+    assert.strictEqual(r.height, reps[0].height, 'recovered height matches');
+    assert.strictEqual(r.size(), reps[0].size());
+  });
+}
+
 // ───────────────────────── dynamic validator-set membership ─────────────────────────
 section('dynamic validator-set membership');
 {

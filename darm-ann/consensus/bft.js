@@ -93,7 +93,9 @@ class BFTNode {
   }
 
   proposerFor(round) {
-    return this.validatorIds[round % this.validatorIds.length];
+    // Rotate the leader by both height and round so successive heights and
+    // failed rounds pick different proposers.
+    return this.validatorIds[(this.height + round) % this.validatorIds.length];
   }
 
   /** Begin consensus on `value` at round 0. */

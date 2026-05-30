@@ -1,0 +1,57 @@
+# Multi-container DARM-ANN cluster — three nodes, each serving its own memory
+# network + operator dashboard, with persistent snapshots.
+#
+#   docker compose up --build
+#   open  http://localhost:3001/darm/dashboard   (also :3002, :3003)
+#   driver:  docker compose exec darm1 node darm-ann/cli.js state
+#
+# Each node is an independent DARM-ANN replica (own LTM blockchain). They can be
+# joined into one logical network via cross-chain pollination (Swarm) or the
+# repo's /register-and-broadcast-node endpoints; membership within a node's
+# consensus cluster changes live via the validator endpoints / RSM.
+
+services:
+  darm1:
+    build: .
+    image: darm-ann:latest
+    ports: ["3001:3001"]
+    environment:
+      PORT: "3001"
+      NODE_URL: "http://darm1:3001"
+      DARM_SNAPSHOT: "/data/node.json"
+      DARM_MIN_AGE_MS: "0"
+    volumes: ["darm1-data:/data"]
+    networks: ["darmnet"]
+
+  darm2:
+    build: .
+    image: darm-ann:latest
+    ports: ["3002:3002"]
+    environment:
+      PORT: "3002"
+      NODE_URL: "http://darm2:3002"
+      DARM_SNAPSHOT: "/data/node.json"
+      DARM_MIN_AGE_MS: "0"
+    volumes: ["darm2-data:/data"]
+    networks: ["darmnet"]
+
+  darm3:
+    build: .
+    image: darm-ann:latest
+    ports: ["3003:3003"]
+    environment:
+      PORT: "3003"
+      NODE_URL: "http://darm3:3003"
+      DARM_SNAPSHOT: "/data/node.json"
+      DARM_MIN_AGE_MS: "0"
+    volumes: ["darm3-data:/data"]
+    networks: ["darmnet"]
+
+networks:
+  darmnet:
+    driver: bridge
+
+volumes:
+  darm1-data:
+  darm2-data:
+  darm3-data:
