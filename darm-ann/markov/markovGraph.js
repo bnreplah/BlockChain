@@ -131,6 +131,30 @@ class MarkovGraph {
     for (const m of this.out.values()) edges += m.size;
     return { states: this.states.size, edges, chainLength: this.chain.length };
   }
+
+  toJSON() {
+    return {
+      states: [...this.states.entries()],
+      out: [...this.out.entries()].map(([from, m]) => [from, [...m.entries()]]),
+      totals: [...this.totals.entries()],
+      chain: this.chain,
+      linkPrev: [...this.linkPrev.entries()],
+      linkNext: [...this.linkNext.entries()],
+      lastState: this._lastState,
+    };
+  }
+
+  load(data) {
+    if (!data) return this;
+    this.states = new Map(data.states || []);
+    this.out = new Map((data.out || []).map(([from, entries]) => [from, new Map(entries)]));
+    this.totals = new Map(data.totals || []);
+    this.chain = data.chain || { head: null, tail: null, length: 0 };
+    this.linkPrev = new Map(data.linkPrev || []);
+    this.linkNext = new Map(data.linkNext || []);
+    this._lastState = data.lastState || null;
+    return this;
+  }
 }
 
 module.exports = MarkovGraph;

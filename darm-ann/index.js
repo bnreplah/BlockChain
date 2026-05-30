@@ -26,6 +26,8 @@ const NgramLM = require('./nn/ngramLM');
 const ModelRegistry = require('./nn/modelRegistry');
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 /** Deep-merge user config over defaults (one level of nesting is enough here). */
 function mergeConfig(base, override) {
@@ -96,6 +98,8 @@ class DarmAnn {
     this.navigator = new GraphNavigator({ graph: this.markov, tinyLM: this.tinyLM, labelOf: (id) => this._stateText.get(id) || id });
     this._lastStateId = null;
 
+    this._taught = new Set();
+    this._refuted = new Set();
     this._maxReward = 1;
   }
 
@@ -124,13 +128,19 @@ class DarmAnn {
   }
 
   // ── Knowledge seeding across the whole cluster (G_K + ESE corpus) ─────────
-  teach(text) {
-    this.embedder.observe(text);
+  _ground(text) {
     for (const v of this.cdcp.voters) {
       v.gte.addGrounded(text);
       v.ese.addExample(text, 1);
     }
+  }
+
+  teach(text) {
+    this.embedder.observe(text);
+    this._ground(text);
     this.ngram.train(text);
+    this._taught.add(text);
+    this._refuted.delete(text);
     return this;
   }
 
@@ -140,6 +150,8 @@ class DarmAnn {
       v.gte.addRefuted(text);
       v.ese.addExample(text, 0);
     }
+    this._refuted.add(text);
+    this._taught.delete(text);
     return this;
   }
 
@@ -312,6 +324,62 @@ class DarmAnn {
       rrcHitRate: this.rrc.hitRate(),
       vocab: this.embedder.vocabSize(),
     };
+  }
+
+  // ── Persistence (deploy / restart) ────────────────────────────────────────
+
+  /** Durable snapshot of the node's knowledge (chains, vocab, graph). */
+  snapshot() {
+    return {
+      version: 1,
+      nodeId: this.nodeId,
+      taught: [...this._taught],
+      refuted: [...this._refuted],
+      embedder: this.embedder.toJSON(),
+      ltm: this.ltm.toJSON(),
+      markov: this.markov.toJSON(),
+    };
+  }
+
+  /** Persist the snapshot to a JSON file on disk. */
+  save(file) {
+    fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(this.snapshot()));
+    return file;
+  }
+
+  /** Rebuild a fully-functional node from a snapshot. */
+  static fromSnapshot(snap, opts = {}) {
+    const node = new DarmAnn({ nodeId: snap.nodeId, config: opts.config, adapter: opts.adapter || null, chain: opts.chain || null });
+    node.embedder.load(snap.embedder);
+    for (const t of snap.taught || []) {
+      node._ground(t);
+      node.ngram.train(t);
+      node._taught.add(t);
+    }
+    for (const r of snap.refuted || []) {
+      for (const v of node.cdcp.voters) {
+        v.gte.addRefuted(r);
+        v.ese.addExample(r, 0);
+      }
+      node._refuted.add(r);
+    }
+    node.ltm.load(snap.ltm);
+    // Re-ground committed claims and warm the retrieval cache.
+    for (const block of node.ltm.blocks) {
+      if (block.superseded) continue;
+      node._ground(block.claim_text);
+      node.rrc.indexBlock(block);
+    }
+    node.markov.load(snap.markov);
+    for (const [id, s] of node.markov.states) node._stateText.set(id, s.label);
+    return node;
+  }
+
+  /** Load a node from a JSON snapshot file. */
+  static load(file, opts = {}) {
+    const snap = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return DarmAnn.fromSnapshot(snap, opts);
   }
 
   static selfDeploy(opts = {}) {

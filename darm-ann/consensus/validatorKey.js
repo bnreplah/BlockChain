@@ -23,6 +23,18 @@ class ValidatorKey {
     this.address = crypto.createHash('sha256').update(this.publicKeyB64).digest('hex').slice(0, 32);
   }
 
+  /**
+   * Derive a deterministic Ed25519 key from a 32-byte seed. Lets separate
+   * processes in a cluster independently reconstruct the *same* validator set
+   * (everyone's public keys) from a shared master seed + index.
+   */
+  static fromSeed(seed32) {
+    const der = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(seed32).subarray(0, 32)]);
+    const privateKey = crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+    const publicKey = crypto.createPublicKey(privateKey);
+    return new ValidatorKey({ publicKey, privateKey });
+  }
+
   sign(messageBuffer) {
     return crypto.sign(null, messageBuffer, this.privateKey).toString('base64');
   }

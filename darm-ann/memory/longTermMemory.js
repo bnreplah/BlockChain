@@ -244,6 +244,30 @@ class LongTermMemory {
     return repaired;
   }
 
+  /** Serialise the LTM blockchain (embeddings as plain arrays). */
+  toJSON() {
+    return {
+      blocks: this.blocks.map((b) => ({ ...b, embedding: Array.from(b.embedding) })),
+      associations: [...this.associations.entries()],
+    };
+  }
+
+  /** Restore a serialised LTM blockchain, rebuilding the index + graph. */
+  load(data) {
+    if (!data) return this;
+    this.blocks = [];
+    this.byHash = new Map();
+    this.index = new (require('../util/lsh').LSHIndex)({ dim: this.dim, tables: 3, bits: 16, seed: 0x17a3 });
+    for (const b of data.blocks || []) {
+      const block = { ...b, embedding: Float64Array.from(b.embedding) };
+      this.blocks.push(block);
+      this.byHash.set(block.hash, block);
+      if (!block.superseded) this.index.insert(block.hash, block.embedding, null);
+    }
+    this.associations = new Map(data.associations || []);
+    return this;
+  }
+
   /** Top-K blocks by historical access (RRC replay warm-up, §7.4). */
   topByAccess(k = 10000) {
     return [...this.blocks]

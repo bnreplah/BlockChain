@@ -34,8 +34,9 @@ Run the suite — **50 unit + integration tests, every module covered**, incl.
 real TCP consensus, Byzantine tolerance, and signature-forgery rejection:
 
 ```bash
-node darm-ann/test.js      # npm run darm:test
+node darm-ann/test.js      # npm run darm:test   (52 tests)
 node darm-ann/demo.js      # npm run darm:demo
+node darm-ann/cluster.js 5 # npm run darm:cluster (multi-process TCP consensus)
 ```
 
 ---
@@ -74,17 +75,47 @@ node.observe({ claim: 'step B ...' });
 const { path } = node.navigate('step A ...', 8);   // model-directed walk
 ```
 
-## Consensus-Driven Consolidation (real BFT)
+## Consensus-Driven Consolidation (real multi-round BFT)
 
 A claim is promoted from STM to the LTM blockchain only when a **τ_c quorum
-(2/3)** of independent validators agree via a real BFT round exchanging
-**Ed25519-signed** PROPOSE/PREVOTE/PRECOMMIT messages over a transport. Each
-validator evaluates independently with its own GTE + ESE. Forged votes are
-rejected; conflicting values cannot both commit (quorum intersection).
+(2/3)** of independent validators agree via a real **multi-round, leader-
+rotating** BFT round exchanging **Ed25519-signed** PROPOSE/PREVOTE/PRECOMMIT
+messages over a transport. Each validator evaluates independently with its own
+GTE + ESE. Forged votes are rejected; conflicting values cannot both commit
+(quorum intersection); and if the round-`r` leader is silent, honest nodes time
+out and **rotate to the round-`r+1` leader** (liveness under faulty leaders).
 
 Runs over the in-process bus by default; the same `BFTNode` runs over real TCP
-sockets for multi-process / multi-host clusters (see the TCP test in
-`test.js`).
+sockets for multi-process / multi-host clusters.
+
+### Multi-process cluster (distributed PoC)
+
+```bash
+node darm-ann/cluster.js 5          # 5 validator processes, real TCP, BFT round
+# → COMMITTED v0 round=0 ... 5/5 processes committed → SUCCESS
+```
+
+Each process independently reconstructs the shared validator set from a master
+seed (deterministic Ed25519 keys) and reaches consensus over sockets.
+
+## Persistence & deployment
+
+Nodes are restartable. `node.snapshot()` / `node.save(file)` serialise the
+durable knowledge (LTM blockchain + embeddings, taught/refuted corpus, Markov
+chain-graph); `DarmAnn.load(file)` rebuilds a fully-functional node.
+
+The server (`app.js`) integrates this for deployment:
+
+```bash
+DARM_SNAPSHOT=./data/node.json \
+DARM_MIN_AGE_MS=60000 DARM_TAU_C=0.67 \
+node app.js 3001 http://localhost:3001
+```
+
+- restores from `DARM_SNAPSHOT` on boot if present,
+- saves the snapshot on `SIGINT`/`SIGTERM` (graceful shutdown),
+- exposes `GET /darm/health` (liveness/readiness), `GET /darm/navigate`,
+  `POST /darm/selfcorrect`, `POST /darm/snapshot` alongside the core endpoints.
 
 ## Self-correction
 
@@ -156,6 +187,8 @@ new DarmAnn({ config: { cdcp: { tauC: 0.80, tMinAgeMs: 0 } } });
   learning happens from inputs you provide via `teach`/`refute`/`observe`.
 - The ESE/TinyLM are real models trained on the corpus they're given — quality
   scales with data volume, as with any learned model.
-- The BFT round implemented here is a single-decree, Byzantine-safe protocol
-  (quorum-intersection safety); multi-round leader rotation/locking is a
-  natural extension point and is not required for safety.
+- The BFT here is a multi-round, leader-rotating, Byzantine-safe protocol with
+  value-locking (quorum-intersection safety + liveness under faulty leaders).
+  It is a working proof of concept rather than a hardened production consensus
+  client (no persistence of consensus WAL, no dynamic validator-set changes,
+  fixed timeouts) — those are the natural next hardening steps.

@@ -2,7 +2,7 @@
 
 const ValidatorKey = require('./validatorKey');
 const { InProcessBus } = require('./transport');
-const { BFTNode } = require('./bft');
+const { BFTNode, runConsensusRound } = require('./bft');
 
 /**
  * Consensus-Driven Consolidation Protocol (CDCP) — paper §5.
@@ -89,7 +89,7 @@ class CDCP {
     };
   }
 
-  /** Run one BFT consensus round for a nomination over a fresh in-process bus. */
+  /** Run a multi-round BFT consensus episode for a nomination (in-process). */
   _runRound(nomination) {
     const bus = new InProcessBus();
     const validators = this._validatorSet();
@@ -108,9 +108,7 @@ class CDCP {
           },
         })
     );
-    const proposer = nodes.find((n) => n.nodeId === this.self.nodeId);
-    proposer.propose(nomination);
-    bus.pump();
+    runConsensusRound(nodes, bus, nomination);
     return { decision, validators };
   }
 

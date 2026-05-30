@@ -127,6 +127,31 @@ class Embedder {
   vocabSize() {
     return this.vocab.size;
   }
+
+  /** Serialise the full learned state (for persistence / restart). */
+  toJSON() {
+    const vocab = {};
+    for (const [tok, v] of this.vocab) vocab[tok] = { in: Array.from(v.in), out: Array.from(v.out), count: v.count };
+    return { dim: this.dim, window: this.window, negatives: this.negatives, vocab, corpus: this.corpus, trainedSteps: this.trainedSteps };
+  }
+
+  /** Restore learned state produced by toJSON(). */
+  load(data) {
+    if (!data) return this;
+    this.dim = data.dim;
+    this.window = data.window;
+    this.negatives = data.negatives;
+    this.vocab = new Map();
+    this.tokensList = [];
+    for (const tok of Object.keys(data.vocab || {})) {
+      const v = data.vocab[tok];
+      this.vocab.set(tok, { in: Float64Array.from(v.in), out: Float64Array.from(v.out), count: v.count });
+      this.tokensList.push(tok);
+    }
+    this.corpus = data.corpus || [];
+    this.trainedSteps = data.trainedSteps || 0;
+    return this;
+  }
 }
 
 module.exports = Embedder;

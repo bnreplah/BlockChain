@@ -53,11 +53,33 @@ console.log(chainID);
 // LLM, no external consensus service. See darm-ann/README.md for the full
 // mapping to the v6.0 white paper.
 // ****************************************************************************
+const fs = require('fs');
 const DarmAnn = require('./darm-ann');
 const { repoChainAdapter } = require('./darm-ann/network/chainAdapter');
-const darm = new DarmAnn({ nodeId: n0deAddress, adapter: repoChainAdapter(Bcoin) });
-darm.autorun(); // background RCE replay + STM triage on self-contained timers
+// Persistence: set DARM_SNAPSHOT to a file path to restore on boot + save on exit.
+const DARM_SNAPSHOT = process.env.DARM_SNAPSHOT || '';
+// Env-tunable consensus config (production knobs, no code edits required).
+const darmConfig = { cdcp: {} };
+if (process.env.DARM_MIN_AGE_MS != null) darmConfig.cdcp.tMinAgeMs = Number(process.env.DARM_MIN_AGE_MS);
+if (process.env.DARM_TAU_C != null) darmConfig.cdcp.tauC = Number(process.env.DARM_TAU_C);
+let darm;
+if (DARM_SNAPSHOT && fs.existsSync(DARM_SNAPSHOT)) {
+    darm = DarmAnn.load(DARM_SNAPSHOT, { adapter: repoChainAdapter(Bcoin), config: darmConfig });
+    console.log("[DARM-ANN] restored from snapshot", DARM_SNAPSHOT);
+} else {
+    darm = new DarmAnn({ nodeId: n0deAddress, adapter: repoChainAdapter(Bcoin), config: darmConfig });
+}
+darm.autorun(); // background RCE replay + STM triage + self-correction
 console.log("[DARM-ANN] memory network online ->", JSON.stringify(darm.state().tiers));
+
+// Graceful shutdown: persist the snapshot and stop background timers.
+function darmShutdown() {
+    try { if (DARM_SNAPSHOT) { darm.save(DARM_SNAPSHOT); console.log("[DARM-ANN] snapshot saved to", DARM_SNAPSHOT); } } catch (e) { console.error("[DARM-ANN] snapshot save failed", e.message); }
+    darm.stop();
+    process.exit(0);
+}
+process.on('SIGINT', darmShutdown);
+process.on('SIGTERM', darmShutdown);
 
 // ****************************************************************************
 // ROUTES:
@@ -205,6 +227,31 @@ app.post("/darm/triage", (req, res)=>{
 // state: Sigma(t) snapshot of tier occupancies and the associative graph
 app.get("/darm/state", (req, res)=>{
     res.json(darm.state());
+});
+
+// navigate: model-directed traversal of the Markov chain-graph (TinyLM-steered)
+app.get("/darm/navigate", (req, res)=>{
+    res.json(darm.navigate(req.query.q || "", Number(req.query.steps) || 8));
+});
+
+// self-correct: validate/repair chains, prune TTL, supersede contradictions
+app.post("/darm/selfcorrect", (req, res)=>{
+    res.json(darm.selfCorrect());
+});
+
+// snapshot: persist durable state to disk (DARM_SNAPSHOT or body.path)
+app.post("/darm/snapshot", (req, res)=>{
+    const path = (req.body && req.body.path) || DARM_SNAPSHOT;
+    if(!path) return res.status(400).json({error: "no snapshot path; set DARM_SNAPSHOT or body.path"});
+    darm.save(path);
+    res.json({note: "snapshot saved", path});
+});
+
+// health: liveness/readiness probe for deployment
+app.get("/darm/health", (req, res)=>{
+    const st = darm.state();
+    const healthy = st.chains.stmValid && st.chains.ltmValid;
+    res.status(healthy ? 200 : 503).json({status: healthy ? "ok" : "degraded", chains: st.chains, tiers: st.tiers});
 });
 
 

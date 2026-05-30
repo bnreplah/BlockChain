@@ -303,39 +303,45 @@ section('engine/bvas (5-stage pipeline)');
 }
 
 // ───────────────────────── consensus/bft + transport ─────────────────────────
-section('consensus/bft (signed BFT over transport)');
+section('consensus/bft (multi-round signed BFT + leader rotation)');
 {
   const { InProcessBus } = require('./consensus/transport');
-  const { BFTNode } = require('./consensus/bft');
+  const { BFTNode, runConsensusRound } = require('./consensus/bft');
   const ValidatorKey = require('./consensus/validatorKey');
 
-  function cluster(n, evaluators) {
+  function cluster(n, evaluators, faulty = () => false) {
     const keys = Array.from({ length: n }, () => new ValidatorKey());
     const validators = new Map();
     keys.forEach((k, i) => validators.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
     const bus = new InProcessBus();
     let decision = null;
-    const nodes = keys.map((k, i) => new BFTNode({ nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67, evaluate: evaluators(i), onDecide: (r) => { if (!decision) decision = r; } }));
+    const nodes = keys.map((k, i) => new BFTNode({ nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67, evaluate: evaluators(i), faulty: faulty(i), onDecide: (r) => { if (!decision) decision = r; } }));
     return { nodes, bus, decision: () => decision };
   }
 
   test('commits when all honest nodes vote YES', () => {
     const c = cluster(7, () => () => ({ vote: 'YES', score: 0.9 }));
-    c.nodes[0].propose({ claim_id: 'c1' });
-    c.bus.pump();
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'c1' });
     assert.ok(c.decision() && c.decision().committed);
+    assert.strictEqual(c.decision().round, 0);
   });
   test('tolerates f < n/3 Byzantine (2 of 7 vote NO) and still commits', () => {
     const c = cluster(7, (i) => () => ({ vote: i < 2 ? 'NO' : 'YES', score: i < 2 ? 0.1 : 0.9 }));
-    c.nodes[6].propose({ claim_id: 'c2' });
-    c.bus.pump();
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'c2' });
     assert.ok(c.decision() && c.decision().committed, 'should commit with 5/7 YES');
   });
   test('does NOT commit when quorum fails (3 of 7 vote NO)', () => {
     const c = cluster(7, (i) => () => ({ vote: i < 3 ? 'NO' : 'YES', score: i < 3 ? 0.1 : 0.9 }));
-    c.nodes[6].propose({ claim_id: 'c3' });
-    c.bus.pump();
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'c3' });
     assert.ok(!c.decision(), 'must not reach 2/3 with only 4/7 YES');
+  });
+  test('leader rotation: silent round-0 leader → round-1 leader commits', () => {
+    // v0 is the round-0 proposer but is faulty (silent). Honest nodes time out,
+    // rotate, and the round-1 proposer (v1) drives the commit.
+    const c = cluster(7, () => () => ({ vote: 'YES', score: 0.9 }), (i) => i === 0);
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'c4' });
+    assert.ok(c.decision() && c.decision().committed, 'should still commit despite a silent leader');
+    assert.ok(c.decision().round >= 1, `expected rotation to round ≥1, got ${c.decision().round}`);
   });
 }
 
@@ -549,6 +555,35 @@ section('self-correction');
   });
 }
 
+// ───────────────────────── persistence (deploy / restart) ─────────────────────────
+section('persistence (save / load)');
+{
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  test('snapshot → restore preserves LTM, retrieval, chains, markov', () => {
+    const node = fast();
+    const c = 'persisted consolidated knowledge survives restart';
+    node.teach(c);
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } });
+    node.consolidate(node.stm.all()[0].claim_id);
+    node.observe({ claim: 'a second observed step', reward: 0.8, epistemic: { conf_cal: 0.8, u_ep: 0.1 } });
+    assert.strictEqual(node.ltm.size, 1);
+
+    const file = path.join(os.tmpdir(), `darm-snap-${process.pid}-${Date.now()}.json`);
+    node.save(file);
+    const restored = DarmAnn.load(file, { config: { cdcp: { tMinAgeMs: 0 } } });
+    fs.unlinkSync(file);
+
+    assert.strictEqual(restored.ltm.size, 1, 'LTM blocks restored');
+    assert.ok(restored.ltm.validate().valid, 'restored LTM chain valid');
+    const q = restored.query(c);
+    assert.ok(q.hit && (q.tier === 'RRC' || q.tier === 'LTM'), `restored retrieval ${q.tier}`);
+    assert.ok(restored.markov.stats().states >= 1, 'markov graph restored');
+    assert.ok(restored.embedder.vocabSize() > 0, 'embedder vocab restored');
+  });
+}
+
 // ───────────────────────── facade integration ─────────────────────────
 section('facade integration');
 {
@@ -591,10 +626,10 @@ async function tcpTest() {
     transports.push(t);
   }
   for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (i !== j) transports[i].addPeer('v' + j, '127.0.0.1', base + j);
-  const nodes = transports.map((t, i) => new BFTNode({ nodeId: 'v' + i, key: keys[i], validators, transport: t, tauC: 0.67, evaluate: () => ({ vote: 'YES', score: 0.9 }), onDecide: () => { decided += 1; } }));
+  const nodes = transports.map((t, i) => new BFTNode({ nodeId: 'v' + i, key: keys[i], validators, transport: t, tauC: 0.67, useTimers: true, timeoutMs: 150, evaluate: () => ({ vote: 'YES', score: 0.9 }), onDecide: () => { decided += 1; } }));
   await new Promise((r) => setTimeout(r, 200));
-  nodes[0].propose({ claim_id: 'tcp-claim' });
-  await new Promise((r) => setTimeout(r, 1000));
+  nodes.forEach((n) => n.start({ claim_id: 'tcp-claim' })); // all nodes enter round 0; proposer broadcasts
+  await new Promise((r) => setTimeout(r, 1500));
   transports.forEach((t) => t.close());
   test('reaches commit across 4 nodes over TCP', () => {
     assert.ok(decided >= Math.ceil((2 * N) / 3), `only ${decided}/${N} committed`);
