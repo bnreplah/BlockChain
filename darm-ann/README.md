@@ -128,10 +128,22 @@ node agreeing. The ordered log + set are written to the WAL; `recover()` rebuild
 exact state after a crash, and `compactWAL()` (wired to a state snapshot) trims
 the log safely.
 
+**Shared LTM via consensus.** A replica's apply-hook commits `memory`
+transactions to its own LTM blockchain. Because every replica applies the same
+committed values deterministically (and embeddings are deterministic), all
+nodes hold a **byte-identical LTM blockchain** — one shared chain, not per-node
+LTMs joined by pollination.
+
+**Live node join over TCP.** `clusterRSM.js` runs `n` validators + 1 joiner
+across real processes: the joiner **state-syncs** the current height, active
+validator set, and LTM from a seed peer, is then **admitted by an
+`add-validator` consensus txn**, and participates from the next height. (A
+single transport multiplexes consensus + state-sync via `BFTNode autoConnect:false`.)
+
 ```bash
-node darm-ann/clusterRSM.js 4     # 4 processes; commits a memory txn, then a
-                                  # remove-validator txn → set shrinks 4→3 live
-# → [rsm] result: SUCCESS — set shrank 4 → 3 live via consensus
+node darm-ann/clusterRSM.js 4     # 4 validators + 1 joiner, real TCP:
+# h0 memory txn → joiner state-syncs → h1 add-validator(joiner) → h2 memory txn
+# → SUCCESS — all 5 processes hold an identical 2-block shared LTM
 ```
 
 ## Persistence & deployment

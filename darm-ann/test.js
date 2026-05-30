@@ -635,6 +635,32 @@ section('consensus/replica (live membership as consensus txns)');
     assert.ok(reps.every((r) => JSON.stringify(r.log.map((e) => e.value)) === ref), 'logs agree');
   });
 
+  test('memory consolidation through the RSM yields one replicated LTM', () => {
+    const LongTermMemory = require('./memory/longTermMemory');
+    const Embedder = require('./nn/embedder');
+    const bus = new InProcessBus();
+    const keys = Array.from({ length: 4 }, () => new ValidatorKey());
+    const base = new Map();
+    keys.forEach((k, i) => base.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    // Each replica applies committed memory txns to its OWN LTM + embedder.
+    // Deterministic init ⇒ identical embeddings ⇒ identical block hashes.
+    const ltms = keys.map(() => new LongTermMemory({ dim: 64 }));
+    const embs = keys.map(() => new Embedder({ dim: 64 }));
+    const reps = keys.map((k, i) =>
+      new Replica({
+        nodeId: `v${i}`, key: k, validators: base, tauC: 0.67,
+        apply: (value) => {
+          if (value.type === 'memory') ltms[i].commit({ claim_text: value.claim, embedding: embs[i].embed(value.claim), confidence: value.confidence || 0.9, salience: 0.7, consensus_votes: [], proposer: 'rsm', validation: {} });
+        },
+      })
+    );
+    runHeight(reps, bus, { type: 'memory', claim: 'forward secrecy via ephemeral keys', confidence: 0.9 });
+    runHeight(reps, bus, { type: 'memory', claim: 'merkle proofs verify inclusion', confidence: 0.9 });
+    const heads = ltms.map((l) => l.blocks.map((b) => b.hash).join(','));
+    assert.ok(ltms.every((l) => l.size === 2), 'each replica committed 2 blocks');
+    assert.ok(heads.every((h) => h === heads[0]), 'all LTM chains are byte-identical');
+  });
+
   test('WAL recovery rebuilds replica state after a crash', () => {
     const bus = new InProcessBus();
     const keys = Array.from({ length: 4 }, () => new ValidatorKey());

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # The DARM-ANN module is dependency-free, so the suite runs without install.
+      - name: Run test suite (59 unit/integration tests)
+        run: node darm-ann/test.js
+      - name: Narrated demo (smoke)
+        run: node darm-ann/demo.js
+      - name: Multi-process TCP consensus (smoke)
+        run: timeout 40 node darm-ann/cluster.js 4 20100
+      - name: Live node-join + shared-LTM RSM over TCP (smoke)
+        run: timeout 50 node darm-ann/clusterRSM.js 4 20200
+
+  docker-smoke:
+    name: Docker build + health smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t darm-ann:ci .
+      - name: Run container
+        run: docker run -d --name darm -p 3001:3001 -e DARM_MIN_AGE_MS=0 darm-ann:ci
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/darm/health || true)
+            if [ "$code" = "200" ]; then echo "healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "container did not become healthy"; docker logs darm; exit 1
+      - name: Exercise the API (teach -> observe -> replay -> query)
+        run: |
+          set -e
+          C="proof of work secures the chain via computational difficulty"
+          curl -sf -X POST http://localhost:3001/darm/teach   -H 'Content-Type: application/json' -d "{\"claim\":\"$C\"}" >/dev/null
+          curl -sf -X POST http://localhost:3001/darm/observe -H 'Content-Type: application/json' -d "{\"claim\":\"$C\",\"reward\":1,\"epistemic\":{\"conf_cal\":0.92,\"u_ep\":0.05}}" >/dev/null
+          curl -sf -X POST http://localhost:3001/darm/replay >/dev/null
+          TIER=$(curl -sf "http://localhost:3001/darm/query?q=$(echo $C | sed 's/ /%20/g')" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tier))")
+          echo "query resolved from: $TIER"
+          test "$TIER" = "RRC" -o "$TIER" = "LTM"
+      - name: Tear down
+        if: always()
+        run: docker rm -f darm || true
+
+  compose-smoke:
+    name: docker compose cluster smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up the 3-node cluster
+        run: docker compose up -d --build
+      - name: Wait for all three nodes to report healthy
+        run: |
+          for p in 3001 3002 3003; do
+            ok=0
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$p/darm/health || true)
+              if [ "$code" = "200" ]; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" != "1" ]; then echo "node on $p unhealthy"; docker compose logs; exit 1; fi
+            echo "node on $p healthy"
+          done
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

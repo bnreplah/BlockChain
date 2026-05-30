@@ -23,7 +23,7 @@ const ValidatorKey = require('./validatorKey');
  *   • asynchronous (TCP): real setTimeout timers (enable with useTimers:true).
  */
 class BFTNode {
-  constructor({ nodeId, key, validators, transport, tauC = 0.67, evaluate, onDecide, faulty = false, useTimers = false, timeoutMs = 300, maxRounds = null, wal = null, height = 0 }) {
+  constructor({ nodeId, key, validators, transport, tauC = 0.67, evaluate, onDecide, faulty = false, useTimers = false, timeoutMs = 300, maxRounds = null, wal = null, height = 0, autoConnect = true }) {
     this.nodeId = nodeId;
     this.key = key;
     this.validators = validators;
@@ -39,7 +39,9 @@ class BFTNode {
     this.validatorIds = [...validators.keys()].sort();
     this.maxRounds = maxRounds || this.validatorIds.length + 2;
     this.totalWeight = [...validators.values()].reduce((s, v) => s + v.weight, 0) || 1;
-    this.transport.connect(nodeId, (msg) => this.handle(msg));
+    // autoConnect=false lets an owner multiplex one transport across several
+    // consumers (e.g. consensus + state-sync), routing messages to handle().
+    if (autoConnect) this.transport.connect(nodeId, (msg) => this.handle(msg));
     this._resetHeight();
   }
 
