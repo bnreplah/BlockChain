@@ -43,7 +43,10 @@ class Replica {
     if (!value || typeof value !== 'object' || !value.type) return { vote: 'NO', score: 0 };
     if (value.type === 'add-validator') return { vote: value.nodeId && value.publicKeyB64 ? 'YES' : 'NO', score: 0.9 };
     if (value.type === 'remove-validator') return { vote: value.nodeId && value.nodeId !== this.nodeId ? 'YES' : 'NO', score: 0.9 };
-    if (value.type === 'memory') return { vote: value.claim ? 'YES' : 'NO', score: 0.9 };
+    if (value.type === 'memory') {
+      const hasContent = value.claim || (Array.isArray(value.claims) && value.claims.length > 0);
+      return { vote: hasContent ? 'YES' : 'NO', score: 0.9 };
+    }
     return { vote: 'NO', score: 0 };
   }
 

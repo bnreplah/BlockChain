@@ -47,14 +47,24 @@ services:
     volumes: ["darm3-data:/data"]
     networks: ["darmnet"]
 
-  # Prometheus scrapes /darm/metrics from every node.
+  # Prometheus scrapes /darm/metrics from every node and evaluates alert rules.
   prometheus:
     image: prom/prometheus:latest
     ports: ["9090:9090"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
     networks: ["darmnet"]
     depends_on: ["darm1", "darm2", "darm3"]
+
+  # Alertmanager routes firing alerts (webhook receiver by default).
+  alertmanager:
+    image: prom/alertmanager:latest
+    ports: ["9093:9093"]
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: ["darmnet"]
+    depends_on: ["prometheus"]
 
   # Grafana with a provisioned Prometheus datasource + DARM-ANN dashboard.
   grafana:

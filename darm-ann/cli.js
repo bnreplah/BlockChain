@@ -5,7 +5,8 @@
  * darm — a small CLI to drive and operate a running DARM-ANN node/cluster over
  * its HTTP endpoints. No dependencies (Node's http only).
  *
- *   node darm-ann/cli.js [--host H] [--port P] <command> [args]
+ *   node darm-ann/cli.js [--host H] [--port P] [--token T] [--tls] <command> [args]
+ *   (env: DARM_HOST, DARM_PORT, DARM_TOKEN, DARM_TLS)
  *
  * Commands:
  *   state | health | validators | models
@@ -21,11 +22,13 @@
 const http = require('http');
 
 function parseArgs(argv) {
-  const opts = { host: process.env.DARM_HOST || '127.0.0.1', port: Number(process.env.DARM_PORT || 3001) };
+  const opts = { host: process.env.DARM_HOST || '127.0.0.1', port: Number(process.env.DARM_PORT || 3001), token: process.env.DARM_TOKEN || '', tls: !!process.env.DARM_TLS };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--host') opts.host = argv[++i];
     else if (argv[i] === '--port') opts.port = Number(argv[++i]);
+    else if (argv[i] === '--token') opts.token = argv[++i];
+    else if (argv[i] === '--tls') opts.tls = true;
     else rest.push(argv[i]);
   }
   return { opts, rest };
@@ -34,8 +37,12 @@ function parseArgs(argv) {
 function request(opts, method, path, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const req = http.request(
-      { host: opts.host, port: opts.port, path, method, headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {} },
+    const headers = {};
+    if (data) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(data); }
+    if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
+    const lib = opts.tls ? require('https') : http;
+    const req = lib.request(
+      { host: opts.host, port: opts.port, path, method, headers, rejectUnauthorized: false },
       (res) => {
         let buf = '';
         res.on('data', (c) => (buf += c));

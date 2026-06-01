@@ -258,7 +258,8 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET /darm/mempool` · `GET /darm/navigate?q=` · `GET /darm/state` ·
 `GET /darm/health` · `GET|POST /darm/validators` ·
 `DELETE /darm/validators/:id` · `GET /darm/metrics` (Prometheus) ·
-`GET /darm/dashboard` (operator UI).
+`GET|POST /darm/alerts` (Alertmanager webhook) · `GET /darm/dashboard`
+(operator UI).
 
 ### Observability (Prometheus + Grafana)
 
@@ -273,11 +274,41 @@ DARM-ANN dashboard auto-provisioned):
 docker compose up --build
 open http://localhost:3000           # Grafana → "DARM-ANN Cluster" dashboard
 open http://localhost:9090           # Prometheus
+open http://localhost:9093           # Alertmanager
 ```
+
+**Alerting:** Prometheus evaluates `monitoring/alerts.yml` (node down, LTM/STM
+chain invalid, quorum-at-risk, mempool backlog, low RRC hit-rate) and routes
+firing alerts through **Alertmanager** (webhook receiver → `POST /darm/alerts`,
+viewable at `GET /darm/alerts`).
 
 Persistence: `DARM_SNAPSHOT` (path), `DARM_SNAPSHOT_MS` (periodic save
 interval, default 60s) — the node restores on boot, snapshots periodically to
 the `/data` volume, and saves on graceful shutdown.
+
+### Throughput benchmark
+
+`darm-ann/bench.js` drives N transactions through the full pipeline
+(submit → gossip mempool → BFT consensus height → shared-LTM commit) across an
+in-process validator set and reports throughput + per-height latency, asserting
+that every replica's LTM ends byte-identical (correctness under load):
+
+```bash
+node darm-ann/bench.js 200 4 10      # 200 txns, 4 validators, batch 10/height
+# → ~1000+ txns/sec, p50 ~8ms/height, ltmAgreement: true   (npm run darm:bench)
+```
+
+### Security (TLS + token auth)
+
+The server supports optional, env-gated hardening (off by default for
+back-compat):
+
+- **Bearer-token auth** — set `DARM_AUTH_TOKEN`; all `/darm/*` endpoints then
+  require `Authorization: Bearer <token>` except `/darm/health` and
+  `/darm/metrics` (left open for probes/scraping).
+- **TLS** — set `DARM_TLS_CERT` + `DARM_TLS_KEY` to serve over HTTPS.
+
+The CLI honours `--token`/`DARM_TOKEN` and `--tls`/`DARM_TLS`.
 
 ## Operate it — CLI + dashboard
 

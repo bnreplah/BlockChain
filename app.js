@@ -8,6 +8,22 @@ const express = require('express');//express for api server
 const app = express(); //initialize the express object
 const jwt = require('jsonwebtoken');//get the json web token models
 app.use(express.json());//use json to parse the requests
+
+// Optional bearer-token auth for the DARM-ANN API. Enabled by setting
+// DARM_AUTH_TOKEN; off by default (back-compat). Health/metrics stay open so
+// container probes and Prometheus can reach them without a credential.
+const DARM_AUTH_TOKEN = process.env.DARM_AUTH_TOKEN || '';
+const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/metrics']);
+app.use((req, res, next)=>{
+    if (!DARM_AUTH_TOKEN) return next();              // auth disabled
+    if (!req.path.startsWith('/darm/')) return next(); // only guard DARM API
+    if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape exempt
+    const h = req.headers['authorization'] || '';
+    const token = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || '');
+    if (token === DARM_AUTH_TOKEN) return next();
+    return res.status(401).json({ error: 'unauthorized', hint: 'set Authorization: Bearer <DARM_AUTH_TOKEN>' });
+});
+
 const authRoute = require('./routes/auth');//require the middle ware for user use /api/user
 const { SHA256 } = require('crypto-js');//used for hashing and crypto algorithms
 const uuid = require('crypto-random-string');//creates a unique id of mathematically random bits ( not really uuid package but similar )
@@ -310,6 +326,20 @@ app.post("/darm/tx", (req, res)=>{
 app.get("/darm/mempool", (req, res)=>{
     res.json({ size: darmMempool.size(), pending: darmMempool.take(50).map(t => ({ id: t.id, type: t.type, origin: t.origin })) });
 });
+
+// alerts: Alertmanager webhook receiver. Records the most recent alerts so they
+// surface in /darm/state and can drive automated responses.
+const darmAlerts = [];
+app.post("/darm/alerts", (req, res)=>{
+    const incoming = (req.body && req.body.alerts) || [];
+    for (const a of incoming) {
+        darmAlerts.unshift({ status: a.status, name: a.labels && a.labels.alertname, severity: a.labels && a.labels.severity, instance: a.labels && a.labels.instance, at: Date.now() });
+    }
+    while (darmAlerts.length > 50) darmAlerts.pop();
+    console.log(`[DARM-ANN] received ${incoming.length} alert(s)`);
+    res.json({ note: "alerts received", count: incoming.length });
+});
+app.get("/darm/alerts", (req, res)=>{ res.json({ recent: darmAlerts.slice(0, 20) }); });
 
 // metrics: Prometheus exposition format for scraping (Grafana dashboards)
 const darmMetrics = require('./darm-ann/metrics');
@@ -655,10 +685,18 @@ function authenticateToken(req, res, next){
 //  Change this to something more friendly and secure, like a prompt or ""
 //
 
-//listen on port
-app.listen(port, ()=>{
-    console.log("Server is now listening on port" ,port);
-});
+//listen on port — HTTPS when DARM_TLS_CERT/DARM_TLS_KEY are provided, else HTTP.
+if (process.env.DARM_TLS_CERT && process.env.DARM_TLS_KEY) {
+    const https = require('https');
+    const tlsOpts = { cert: fs.readFileSync(process.env.DARM_TLS_CERT), key: fs.readFileSync(process.env.DARM_TLS_KEY) };
+    https.createServer(tlsOpts, app).listen(port, ()=>{
+        console.log("Server is now listening on port (TLS)", port);
+    });
+} else {
+    app.listen(port, ()=>{
+        console.log("Server is now listening on port" ,port);
+    });
+}
 
 
 // console.log('---------------------------Development envriornment node app starting----------------------');

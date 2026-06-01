@@ -978,6 +978,19 @@ section('persistence (save / load)');
 
 // ───────────────────────── facade integration ─────────────────────────
 // ───────────────────────── metrics (Prometheus exposition) ─────────────────────────
+// ───────────────────────── throughput benchmark ─────────────────────────
+section('bench (throughput pipeline)');
+{
+  const { runBenchmark } = require('./bench');
+  test('drives all txns through mempool→consensus→LTM with identical chains', () => {
+    const r = runBenchmark({ txns: 40, validators: 4, batch: 5 });
+    assert.strictEqual(r.committedTxns, 40, 'all txns committed');
+    assert.strictEqual(r.ltmBlocks, 40, 'LTM grew by every txn');
+    assert.ok(r.ltmAgreement, 'all replica LTM chains byte-identical under load');
+    assert.ok(r.throughputTps > 0, 'positive throughput');
+  });
+}
+
 section('metrics (Prometheus exposition)');
 {
   const metrics = require('./metrics');
