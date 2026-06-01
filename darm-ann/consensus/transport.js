@@ -18,26 +18,51 @@ const net = require('net');
  */
 
 class InProcessBus {
-  constructor() {
+  constructor({ faults = null } = {}) {
     this.handlers = new Map();
     this.queue = [];
+    // Optional fault-injection model for adversarial testing:
+    //   { drop: fn(from,to,msg)->bool, partition: Set<"a|b">, dropped: count }
+    this.faults = faults; // set/replace via setFaults()
+    this.stats = { sent: 0, dropped: 0, delivered: 0 };
+  }
+
+  setFaults(faults) {
+    this.faults = faults;
+    return this;
   }
 
   connect(nodeId, onMessage) {
     this.handlers.set(nodeId, onMessage);
   }
 
-  _enqueue(to, msg) {
+  _blocked(from, to, msg) {
+    const f = this.faults;
+    if (!f) return false;
+    if (f.partition) {
+      // Symmetric link cut between two nodes.
+      if (f.partition.has(`${from}|${to}`) || f.partition.has(`${to}|${from}`)) return true;
+    }
+    if (typeof f.drop === 'function' && f.drop(from, to, msg)) return true;
+    return false;
+  }
+
+  _enqueue(from, to, msg) {
+    this.stats.sent += 1;
+    if (this._blocked(from, to, msg)) {
+      this.stats.dropped += 1;
+      return;
+    }
     // Serialise/clone to mimic a wire boundary (no shared references).
     this.queue.push({ to, msg: JSON.parse(JSON.stringify(msg)) });
   }
 
-  send(_from, to, msg) {
-    this._enqueue(to, msg);
+  send(from, to, msg) {
+    this._enqueue(from, to, msg);
   }
 
   broadcast(from, msg) {
-    for (const id of this.handlers.keys()) if (id !== from) this._enqueue(id, msg);
+    for (const id of this.handlers.keys()) if (id !== from) this._enqueue(from, id, msg);
   }
 
   /** Drain the queue, delivering messages until the round goes quiet. */
@@ -46,7 +71,10 @@ class InProcessBus {
     while (this.queue.length && steps < maxSteps) {
       const { to, msg } = this.queue.shift();
       const h = this.handlers.get(to);
-      if (h) h(msg);
+      if (h) {
+        this.stats.delivered += 1;
+        h(msg);
+      }
       steps += 1;
     }
     return steps;

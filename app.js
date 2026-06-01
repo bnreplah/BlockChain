@@ -72,14 +72,48 @@ if (DARM_SNAPSHOT && fs.existsSync(DARM_SNAPSHOT)) {
 darm.autorun(); // background RCE replay + STM triage + self-correction
 console.log("[DARM-ANN] memory network online ->", JSON.stringify(darm.state().tiers));
 
+// Periodic durable snapshot to the persistent volume (production deploy). The
+// interval (ms) is DARM_SNAPSHOT_MS; 0 disables. Default 60s when a path is set.
+const DARM_SNAPSHOT_MS = process.env.DARM_SNAPSHOT_MS != null ? Number(process.env.DARM_SNAPSHOT_MS) : (DARM_SNAPSHOT ? 60000 : 0);
+let darmSnapshotTimer = null;
+function persistSnapshot() {
+    if (!DARM_SNAPSHOT) return null;
+    darm.save(DARM_SNAPSHOT);
+    return DARM_SNAPSHOT;
+}
+if (DARM_SNAPSHOT && DARM_SNAPSHOT_MS > 0) {
+    darmSnapshotTimer = setInterval(() => { try { persistSnapshot(); } catch (e) { console.error("[DARM-ANN] periodic snapshot failed", e.message); } }, DARM_SNAPSHOT_MS);
+    if (darmSnapshotTimer.unref) darmSnapshotTimer.unref();
+}
+
 // Graceful shutdown: persist the snapshot and stop background timers.
+let darmShuttingDown = false;
 function darmShutdown() {
-    try { if (DARM_SNAPSHOT) { darm.save(DARM_SNAPSHOT); console.log("[DARM-ANN] snapshot saved to", DARM_SNAPSHOT); } } catch (e) { console.error("[DARM-ANN] snapshot save failed", e.message); }
+    if (darmShuttingDown) return; darmShuttingDown = true;
+    try { if (persistSnapshot()) console.log("[DARM-ANN] snapshot saved to", DARM_SNAPSHOT); } catch (e) { console.error("[DARM-ANN] snapshot save failed", e.message); }
+    if (darmSnapshotTimer) clearInterval(darmSnapshotTimer);
     darm.stop();
     process.exit(0);
 }
 process.on('SIGINT', darmShutdown);
 process.on('SIGTERM', darmShutdown);
+
+// Gossip mempool: any node can submit a transaction; it is admitted locally and
+// gossiped to registered network peers (HTTP), which re-gossip on first sight.
+// A submitted 'memory' tx is observed into this node's memory pipeline.
+const Mempool = require('./darm-ann/consensus/mempool');
+const darmMempool = new Mempool({ nodeId: n0deAddress, fanout: 4, ttl: 4, onTx: (tx) => {
+    if (tx.type === 'memory' && tx.payload && tx.payload.claim) {
+        darm.observe({ claim: tx.payload.claim, reward: tx.payload.reward != null ? tx.payload.reward : 1, epistemic: tx.payload.epistemic });
+    }
+}});
+// HTTP gossip: forward a tx to each registered network node's /darm/tx endpoint.
+function gossipTxToPeers(tx, ttl) {
+    if (ttl <= 0) return;
+    (Bcoin.networkNode || []).forEach((peerUrl) => {
+        rp({ uri: peerUrl + '/darm/tx', method: 'POST', body: { tx, ttl: ttl - 1 }, json: true }).catch(() => {});
+    });
+}
 
 // ****************************************************************************
 // ROUTES:
@@ -252,6 +286,29 @@ app.get("/darm/health", (req, res)=>{
     const st = darm.state();
     const healthy = st.chains.stmValid && st.chains.ltmValid;
     res.status(healthy ? 200 : 503).json({status: healthy ? "ok" : "degraded", chains: st.chains, tiers: st.tiers});
+});
+
+// tx: submit a new transaction (origin) OR receive a gossiped one (peers).
+// Origin submit:  body = { type, payload }      → admit locally + gossip
+// Gossip relay:   body = { tx, ttl }            → verify, dedup, re-gossip
+app.post("/darm/tx", (req, res)=>{
+    if (req.body && req.body.tx) {
+        // Inbound gossip from a peer.
+        const before = darmMempool.seen.has(req.body.tx.id);
+        darmMempool.handle({ type: 'TX_GOSSIP', ttl: req.body.ttl || 0, tx: req.body.tx });
+        const admitted = !before && darmMempool.seen.has(req.body.tx.id);
+        if (admitted) gossipTxToPeers(req.body.tx, req.body.ttl || 0);
+        return res.json({ note: admitted ? "tx admitted + relayed" : "duplicate/ignored" });
+    }
+    // Origin submission.
+    const tx = darmMempool.submit(req.body.type || 'memory', req.body.payload || {});
+    gossipTxToPeers(tx, darmMempool.ttl);
+    res.json({ note: "tx submitted and gossiped", tx: { id: tx.id, type: tx.type } });
+});
+
+// mempool: inspect pending transactions
+app.get("/darm/mempool", (req, res)=>{
+    res.json({ size: darmMempool.size(), pending: darmMempool.take(50).map(t => ({ id: t.id, type: t.type, origin: t.origin })) });
 });
 
 // validators: dynamic validator-set membership

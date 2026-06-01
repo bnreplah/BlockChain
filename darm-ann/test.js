@@ -592,6 +592,113 @@ section('consensus/wal (crash recovery)');
 }
 
 // ───────────────────────── replicated state machine: live membership via consensus ─────────────────────────
+// ───────────────────────── gossip mempool ─────────────────────────
+section('consensus/mempool (gossip tx propagation)');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const Mempool = require('./consensus/mempool');
+  const ValidatorKey = require('./consensus/validatorKey');
+
+  function gossipNet(n, fanout = 3) {
+    const bus = new InProcessBus();
+    const ids = Array.from({ length: n }, (_, i) => `v${i}`);
+    // Seeded PRNG → deterministic gossip fan-out (no flaky coverage).
+    let s = 12345;
+    const rng = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    const pools = ids.map((id) => new Mempool({ nodeId: id, key: new ValidatorKey(), transport: bus, fanout, ttl: n + 2, rng }));
+    pools.forEach((p) => p.setPeers(ids));
+    pools.forEach((p) => bus.connect(p.nodeId, (msg) => p.handle(msg)));
+    return { bus, pools };
+  }
+
+  test('a tx submitted at one node reaches every node via gossip', () => {
+    const { bus, pools } = gossipNet(6);
+    pools[3].submit('memory', { claim: 'gossiped fact' });
+    bus.pump();
+    assert.ok(pools.every((p) => p.size() === 1), 'all nodes hold the tx');
+    const ids = new Set(pools.map((p) => p.take(1)[0].id));
+    assert.strictEqual(ids.size, 1, 'same tx id everywhere');
+  });
+
+  test('duplicate gossip is deduplicated (no infinite re-broadcast)', () => {
+    const { bus, pools } = gossipNet(5);
+    const tx = pools[0].submit('memory', { claim: 'dup' });
+    bus.pump();
+    // Re-inject the same tx at another node; pool size must stay 1.
+    pools[2].handle({ type: 'TX_GOSSIP', ttl: 5, tx });
+    bus.pump();
+    assert.ok(pools.every((p) => p.size() === 1));
+  });
+
+  test('a forged tx (bad signature) is dropped by peers', () => {
+    const { bus, pools } = gossipNet(4);
+    const tx = pools[0].submit('memory', { claim: 'real' });
+    const forged = { ...tx, payload: { claim: 'tampered' } }; // id no longer matches/sig invalid
+    pools[1].handle({ type: 'TX_GOSSIP', ttl: 4, tx: forged });
+    bus.pump();
+    assert.ok(pools.every((p) => p.size() === 1), 'forged tx not admitted');
+  });
+
+  test('committed txns are removed from the pool', () => {
+    const { bus, pools } = gossipNet(3);
+    const tx = pools[0].submit('memory', { claim: 'to commit' });
+    bus.pump();
+    pools.forEach((p) => p.remove([tx.id]));
+    assert.ok(pools.every((p) => p.size() === 0));
+    // Dedup memory persists: re-gossip does not re-admit a committed tx.
+    pools[1].handle({ type: 'TX_GOSSIP', ttl: 3, tx });
+    bus.pump();
+    assert.ok(pools.every((p) => p.size() === 0), 'committed tx not re-admitted');
+  });
+}
+
+// ───────────────────────── fault injection (safety + liveness) ─────────────────────────
+section('consensus/bft fault injection');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const { BFTNode, runConsensusRound } = require('./consensus/bft');
+  const ValidatorKey = require('./consensus/validatorKey');
+
+  function cluster(n, faults, evaluators) {
+    const keys = Array.from({ length: n }, () => new ValidatorKey());
+    const validators = new Map();
+    keys.forEach((k, i) => validators.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const bus = new InProcessBus({ faults });
+    let decision = null;
+    const nodes = keys.map((k, i) => new BFTNode({ nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67, evaluate: (evaluators && evaluators(i)) || (() => ({ vote: 'YES', score: 0.9 })), onDecide: (r) => { if (!decision) decision = r; } }));
+    return { nodes, bus, decision: () => decision };
+  }
+
+  test('liveness: random 20% message drop still reaches commit', () => {
+    let seed = 42;
+    const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const c = cluster(7, { drop: () => rand() < 0.2 });
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'drop20' });
+    assert.ok(c.decision() && c.decision().committed, 'should still commit under 20% loss');
+    assert.ok(c.bus.stats.dropped > 0, 'drops actually occurred');
+  });
+
+  test('liveness: a partitioned minority (2 of 7) does not block commit', () => {
+    // Cut v5,v6 off from everyone — the 5-node majority must still commit.
+    const partition = new Set();
+    for (const a of ['v5', 'v6']) for (const b of ['v0', 'v1', 'v2', 'v3', 'v4']) { partition.add(`${a}|${b}`); }
+    const c = cluster(7, { partition });
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'partition' });
+    assert.ok(c.decision() && c.decision().committed, 'majority commits despite the partition');
+  });
+
+  test('safety: total partition (no quorum reachable) does NOT commit', () => {
+    // Split into {v0,v1,v2} | {v3,v4,v5,v6}; neither side reaches 2/3 of 7.
+    const A = ['v0', 'v1', 'v2'];
+    const B = ['v3', 'v4', 'v5', 'v6'];
+    const partition = new Set();
+    for (const a of A) for (const b of B) partition.add(`${a}|${b}`);
+    const c = cluster(7, { partition });
+    runConsensusRound(c.nodes, c.bus, { claim_id: 'split' });
+    assert.ok(!c.decision(), 'no side has a 2/3 quorum → must not commit');
+  });
+}
+
 section('consensus/replica (live membership as consensus txns)');
 {
   const { InProcessBus } = require('./consensus/transport');

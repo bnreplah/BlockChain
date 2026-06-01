@@ -165,6 +165,20 @@ class BFTNode {
     this._doPrevote(msg.round);
   }
 
+  /**
+   * Re-send this node's latest current-round messages. Under lossy transports
+   * a node's prevote/precommit may be dropped; periodic re-broadcast (gossip
+   * amplification) lets peers eventually receive it without weakening safety —
+   * the messages are byte-identical and idempotent on receipt.
+   */
+  rebroadcast() {
+    if (this.decided) return;
+    const rs = this.rounds.get(this.round);
+    if (!rs) return;
+    if (rs.lastPrevote) { this.handle(JSON.parse(JSON.stringify(rs.lastPrevote))); this.transport.broadcast(this.nodeId, rs.lastPrevote); }
+    if (rs.lastPrecommit) { this.handle(JSON.parse(JSON.stringify(rs.lastPrecommit))); this.transport.broadcast(this.nodeId, rs.lastPrecommit); }
+  }
+
   _doPrevote(round) {
     const rs = this._r(round);
     if (rs.prevoted) return;
@@ -182,7 +196,9 @@ class BFTNode {
       voteObj.signature = this.key.sign(BVAS.canonicalVoteBytes(voteObj));
     }
     this._log({ t: 'PREVOTE', round, choice });
-    this._send({ type: 'PREVOTE', round, claim_id: this.value.claim_id, from: this.nodeId, choice, vote: voteObj });
+    const pv = { type: 'PREVOTE', round, claim_id: this.value.claim_id, from: this.nodeId, choice, vote: voteObj };
+    rs.lastPrevote = pv;
+    this._send(pv);
     this._arm('prevote');
   }
 
@@ -209,7 +225,9 @@ class BFTNode {
     this.step = 'precommit';
     if (choice === 'value') this.locked = { round }; // lock on the value
     this._log({ t: 'PRECOMMIT', round, choice }); // durable before broadcasting
-    this._send({ type: 'PRECOMMIT', round, claim_id: this.value.claim_id, from: this.nodeId, choice, sig: this.key.sign(this._precommitBytes(round, choice)) });
+    const pc = { type: 'PRECOMMIT', round, claim_id: this.value.claim_id, from: this.nodeId, choice, sig: this.key.sign(this._precommitBytes(round, choice)) };
+    if (choice === 'value') rs.lastPrecommit = pc;
+    this._send(pc);
     this._arm('precommit');
   }
 
@@ -263,16 +281,23 @@ class BFTNode {
  * Synchronous driver for the InProcessBus: alternate message delivery (pump)
  * with timeout firing until a node commits or rounds are exhausted.
  */
-function runConsensusRound(nodes, bus, value, { maxIterations = 200 } = {}) {
+function runConsensusRound(nodes, bus, value, { maxIterations = 400 } = {}) {
   nodes.forEach((n) => n.start(value));
+  let idle = 0;
   for (let i = 0; i < maxIterations; i++) {
     bus.pump();
     if (nodes.some((n) => n.decided)) break;
+    // Re-broadcast each node's latest votes (gossip amplification recovers
+    // messages dropped by a lossy transport), then advance timeouts.
+    for (const n of nodes) n.rebroadcast();
     let progressed = false;
     for (const n of nodes) progressed = n.onTimeout() || progressed;
     bus.pump();
     if (nodes.some((n) => n.decided)) break;
-    if (!progressed) break;
+    // Allow several "quiet" iterations: under loss, amplification on a later
+    // iteration may still deliver a quorum even when one pass made no progress.
+    idle = progressed ? 0 : idle + 1;
+    if (idle > nodes.length + 3) break;
   }
   return nodes.find((n) => n.decided) ? true : false;
 }

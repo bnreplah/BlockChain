@@ -230,13 +230,38 @@ const swarm = new DarmAnn.Swarm({ nodes: [a, b, c] }); // heterogeneous chains
 swarm.pollinate({ strategy: 'top-confidence', topK: 5 });
 ```
 
+### Gossip transaction mempool
+
+`consensus/mempool.js` is an epidemic-broadcast mempool: **any** node can submit
+a signed transaction; it is admitted locally and gossiped to a random fan-out of
+peers (bounded TTL), which verify, deduplicate, and re-gossip — so a tx submitted
+anywhere reaches every node. Validators pull pending txns to propose the next
+consensus height; committed txns are removed (dedup memory prevents re-admission).
+
+In the server, `POST /darm/tx { type, payload }` submits + gossips over the
+repo's registered node network (HTTP relay); a `memory` tx is observed into the
+receiving node's pipeline. `GET /darm/mempool` inspects pending txns.
+
+### Fault tolerance (tested)
+
+The in-process bus supports fault injection (`{ drop, partition }`) and the BFT
+engine re-broadcasts its latest votes each round (gossip amplification), so the
+suite verifies: **liveness** under 20% random message loss and under a
+partitioned minority, and **safety** under a full network split (no side with a
+2/3 quorum commits).
+
 ## HTTP API (via `app.js`)
 
 `POST /darm/observe` · `GET /darm/query?q=` · `POST /darm/teach` ·
 `POST /darm/refute` · `POST /darm/replay` · `POST /darm/triage` ·
-`POST /darm/selfcorrect` · `POST /darm/snapshot` · `GET /darm/navigate?q=` ·
-`GET /darm/state` · `GET /darm/health` · `GET|POST /darm/validators` ·
+`POST /darm/selfcorrect` · `POST /darm/snapshot` · `POST /darm/tx` ·
+`GET /darm/mempool` · `GET /darm/navigate?q=` · `GET /darm/state` ·
+`GET /darm/health` · `GET|POST /darm/validators` ·
 `DELETE /darm/validators/:id` · `GET /darm/dashboard` (operator UI).
+
+Persistence: `DARM_SNAPSHOT` (path), `DARM_SNAPSHOT_MS` (periodic save
+interval, default 60s) — the node restores on boot, snapshots periodically to
+the `/data` volume, and saves on graceful shutdown.
 
 ## Operate it — CLI + dashboard
 

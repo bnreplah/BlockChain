@@ -15,8 +15,11 @@ COPY . .
 ENV PORT=3001 \
     NODE_URL=http://localhost:3001 \
     DARM_SNAPSHOT=/data/node.json \
+    DARM_SNAPSHOT_MS=60000 \
     DARM_MIN_AGE_MS=60000
 
+# Persistent state volume (shared LTM snapshot + WAL survive restarts).
+RUN mkdir -p /data
 EXPOSE 3001
 VOLUME ["/data"]
 
