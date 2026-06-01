@@ -311,6 +311,19 @@ app.get("/darm/mempool", (req, res)=>{
     res.json({ size: darmMempool.size(), pending: darmMempool.take(50).map(t => ({ id: t.id, type: t.type, origin: t.origin })) });
 });
 
+// metrics: Prometheus exposition format for scraping (Grafana dashboards)
+const darmMetrics = require('./darm-ann/metrics');
+const darmStartTime = Date.now();
+app.get("/darm/metrics", (req, res)=>{
+    const text = darmMetrics.render(darm, {
+        mempoolSize: darmMempool.size(),
+        uptimeSeconds: (Date.now() - darmStartTime) / 1000,
+        networkNodes: (Bcoin.networkNode || []).length,
+    });
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.send(text);
+});
+
 // validators: dynamic validator-set membership
 app.get("/darm/validators", (req, res)=>{
     res.json({ validators: darm.validators(), membershipVersion: darm.state().cluster.membershipVersion });

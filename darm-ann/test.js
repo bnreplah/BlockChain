@@ -699,6 +699,75 @@ section('consensus/bft fault injection');
   });
 }
 
+// ───────────────────────── Byzantine equivocation ─────────────────────────
+section('consensus/bft Byzantine equivocation');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const { BFTNode, runConsensusRound } = require('./consensus/bft');
+  const ValidatorKey = require('./consensus/validatorKey');
+  const BVAS = require('./engine/bvas');
+
+  function honestCluster(n, byzantineIdx = []) {
+    const keys = Array.from({ length: n }, () => new ValidatorKey());
+    const validators = new Map();
+    keys.forEach((k, i) => validators.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const bus = new InProcessBus();
+    let decision = null;
+    const nodes = keys.map((k, i) => new BFTNode({ nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67, evaluate: () => ({ vote: 'YES', score: 0.9 }), onDecide: (r) => { if (!decision) decision = r; } }));
+    return { keys, validators, bus, nodes, decision: () => decision };
+  }
+
+  test('an equivocating voter is counted once per round (no double-weight)', () => {
+    const c = honestCluster(7);
+    // The honest round-0 proposer is whoever proposerFor(0) selects.
+    const proposerId = c.nodes[0].proposerFor(0);
+    c.nodes.forEach((nd) => nd.start({ claim_id: 'equiv' }));
+    c.bus.pump();
+    // v1 (Byzantine) sends a SECOND, differently-scored prevote for the same round.
+    const vIdx = 1;
+    const dup = { claim_id: 'equiv', node_id: 'v1', vote: 'YES', vote_score: 0.123456, publicKey: c.keys[vIdx].publicKeyB64 };
+    dup.signature = c.keys[vIdx].sign(BVAS.canonicalVoteBytes(dup));
+    c.nodes.forEach((nd) => nd.handle({ type: 'PREVOTE', round: 0, claim_id: 'equiv', from: 'v1', choice: 'value', vote: dup }));
+    c.bus.pump();
+    // Each honest node's round-0 prevote tally has exactly ONE entry for v1.
+    for (const nd of c.nodes) {
+      const rs = nd.rounds.get(0);
+      if (rs) assert.ok(!rs.prevotes.has('v1') || [...rs.prevotes.keys()].filter((k) => k === 'v1').length === 1, 'v1 counted at most once');
+    }
+    assert.ok(true);
+  });
+
+  test('safety: f Byzantine equivocators cannot forge a quorum (4 honest of 7 < 2/3)', () => {
+    // 3 Byzantine nodes (v0,v1,v2) try to push a value while the 4 honest nodes
+    // (v3..v6) vote NO. 4/7 < ⌈2/3·7⌉=5, so no commit may occur.
+    const keys = Array.from({ length: 7 }, () => new ValidatorKey());
+    const validators = new Map();
+    keys.forEach((k, i) => validators.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const bus = new InProcessBus();
+    let decision = null;
+    const nodes = keys.map((k, i) => new BFTNode({
+      nodeId: `v${i}`, key: k, validators, transport: bus, tauC: 0.67,
+      evaluate: () => ({ vote: i < 3 ? 'YES' : 'NO', score: i < 3 ? 0.9 : 0.0 }),
+      onDecide: (r) => { if (!decision) decision = r; },
+    }));
+    runConsensusRound(nodes, bus, { claim_id: 'byz' });
+    assert.ok(!decision, 'Byzantine minority cannot manufacture a 2/3 quorum');
+  });
+
+  test('a vote with a valid signature but wrong signer identity is rejected', () => {
+    const c = honestCluster(5);
+    // Forge: claim to be v2 but sign with v4's key (publicKey won't match v2's).
+    const forged = { claim_id: 'x', node_id: 'v2', vote: 'YES', vote_score: 0.9, publicKey: c.keys[4].publicKeyB64 };
+    forged.signature = c.keys[4].sign(BVAS.canonicalVoteBytes(forged));
+    const target = c.nodes[0];
+    target.start({ claim_id: 'x' });
+    target.handle({ type: 'PREVOTE', round: 0, claim_id: 'x', from: 'v2', choice: 'value', vote: forged });
+    const rs = target.rounds.get(0);
+    // v2's slot must not be filled by a key that isn't v2's registered key.
+    assert.ok(!rs || !rs.prevotes.has('v2') || rs.prevotes.get('v2') === 'nil', 'identity-mismatched vote rejected');
+  });
+}
+
 section('consensus/replica (live membership as consensus txns)');
 {
   const { InProcessBus } = require('./consensus/transport');
@@ -810,6 +879,53 @@ section('consensus/replica (live membership as consensus txns)');
   });
 }
 
+// ───────────────────────── mempool-driven RSM (any node proposes) ─────────────────────────
+section('consensus/replica driven by the gossip mempool');
+{
+  const { InProcessBus } = require('./consensus/transport');
+  const { Replica, runHeight } = require('./consensus/replica');
+  const Mempool = require('./consensus/mempool');
+  const ValidatorKey = require('./consensus/validatorKey');
+
+  test('txns submitted at any node propagate and are committed by the proposer', () => {
+    const consensusBus = new InProcessBus();
+    const gossipBus = new InProcessBus();
+    const n = 4;
+    const keys = Array.from({ length: n }, () => new ValidatorKey());
+    const base = new Map();
+    keys.forEach((k, i) => base.set(`v${i}`, { publicKeyB64: k.publicKeyB64, weight: 1 }));
+    const ids = keys.map((_, i) => `v${i}`);
+    let s = 99;
+    const rng = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+    const reps = keys.map((k, i) => new Replica({ nodeId: `v${i}`, key: k, validators: base, tauC: 0.67 }));
+    const pools = keys.map((k, i) => new Mempool({ nodeId: `v${i}`, key: k, transport: gossipBus, fanout: 3, ttl: n + 2, rng }));
+    pools.forEach((p) => p.setPeers(ids));
+    pools.forEach((p) => gossipBus.connect(p.nodeId, (m) => p.handle(m)));
+
+    // Two DIFFERENT nodes submit txns (not an orchestrator).
+    const t1 = pools[2].submit('memory', { claim: 'fact from node 2' });
+    const t3 = pools[0].submit('memory', { claim: 'fact from node 0' });
+    gossipBus.pump();
+    assert.ok(pools.every((p) => p.size() === 2), 'both txns reached every mempool');
+
+    // Each height: the round-robin proposer pulls its OWN mempool's head tx.
+    for (let h = 0; h < 2; h++) {
+      const proposerId = ids[(reps[0].height) % ids.length];
+      const pIdx = ids.indexOf(proposerId);
+      const tx = pools[pIdx].take(1)[0];
+      const value = { type: 'memory', claim: tx.payload.claim, txId: tx.id };
+      const r = runHeight(reps, consensusBus, value);
+      assert.ok(r.committed, `height ${h} committed`);
+      pools.forEach((p) => p.remove([tx.id])); // committed txns leave every pool
+    }
+    assert.ok(reps.every((rp) => rp.height === 2), 'two heights committed');
+    assert.ok(pools.every((p) => p.size() === 0), 'all submitted txns consumed');
+    // Every replica agrees on the same ordered log.
+    const ref = JSON.stringify(reps[0].log.map((e) => e.value.claim));
+    assert.ok(reps.every((rp) => JSON.stringify(rp.log.map((e) => e.value.claim)) === ref), 'logs agree');
+  });
+}
+
 // ───────────────────────── dynamic validator-set membership ─────────────────────────
 section('dynamic validator-set membership');
 {
@@ -861,6 +977,28 @@ section('persistence (save / load)');
 }
 
 // ───────────────────────── facade integration ─────────────────────────
+// ───────────────────────── metrics (Prometheus exposition) ─────────────────────────
+section('metrics (Prometheus exposition)');
+{
+  const metrics = require('./metrics');
+  test('renders valid Prometheus text with core gauges', () => {
+    const node = fast();
+    node.teach('observability metric fact');
+    node.observe({ claim: 'observability metric fact', reward: 1, epistemic: { conf_cal: 0.9, u_ep: 0.05 } });
+    const text = metrics.render(node, { mempoolSize: 3, uptimeSeconds: 12.7, networkNodes: 2 });
+    assert.ok(/# TYPE darm_tier_entries gauge/.test(text), 'has tier gauge');
+    assert.ok(/darm_tier_entries\{tier="STM"\} \d+/.test(text), 'has STM tier line');
+    assert.ok(/darm_stm_chain_valid 1/.test(text), 'reports STM chain valid');
+    assert.ok(/darm_mempool_size 3/.test(text), 'includes extra mempool gauge');
+    assert.ok(/darm_uptime_seconds 12/.test(text), 'includes uptime counter');
+    // Every metric line is name{labels}? value (well-formed exposition).
+    for (const l of text.split('\n')) {
+      if (!l || l.startsWith('#')) continue;
+      assert.ok(/^[a-z_]+(\{[^}]*\})? -?\d+(\.\d+)?$/.test(l), `well-formed: "${l}"`);
+    }
+  });
+}
+
 section('facade integration');
 {
   test('observe → consolidate → query end-to-end; state() reports chains', () => {

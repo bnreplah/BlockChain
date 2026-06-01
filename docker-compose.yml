@@ -47,6 +47,30 @@ services:
     volumes: ["darm3-data:/data"]
     networks: ["darmnet"]
 
+  # Prometheus scrapes /darm/metrics from every node.
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: ["darmnet"]
+    depends_on: ["darm1", "darm2", "darm3"]
+
+  # Grafana with a provisioned Prometheus datasource + DARM-ANN dashboard.
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "darm"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks: ["darmnet"]
+    depends_on: ["prometheus"]
+
 networks:
   darmnet:
     driver: bridge
@@ -55,3 +79,4 @@ volumes:
   darm1-data:
   darm2-data:
   darm3-data:
+  grafana-data:

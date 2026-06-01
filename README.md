@@ -30,7 +30,9 @@ npm run darm:demo     # narrated end-to-end demo
 npm run darm:cluster  # multi-process TCP BFT consensus
 npm run darm:rsm      # live node-join + shared-LTM replication via consensus
 npm run darm:serve    # HTTP node + operator dashboard at /darm/dashboard
-docker compose up --build   # 3-node containerised cluster with dashboards
+docker compose up --build   # 3-node cluster + Prometheus + Grafana dashboards
+#   nodes: http://localhost:3001..3003/darm/dashboard
+#   Grafana: http://localhost:3000   ·   Prometheus: http://localhost:9090
 ```
 
 CI (`.github/workflows/ci.yml`) runs the test suite, the consensus/RSM

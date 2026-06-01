@@ -257,7 +257,23 @@ partitioned minority, and **safety** under a full network split (no side with a
 `POST /darm/selfcorrect` · `POST /darm/snapshot` · `POST /darm/tx` ·
 `GET /darm/mempool` · `GET /darm/navigate?q=` · `GET /darm/state` ·
 `GET /darm/health` · `GET|POST /darm/validators` ·
-`DELETE /darm/validators/:id` · `GET /darm/dashboard` (operator UI).
+`DELETE /darm/validators/:id` · `GET /darm/metrics` (Prometheus) ·
+`GET /darm/dashboard` (operator UI).
+
+### Observability (Prometheus + Grafana)
+
+`GET /darm/metrics` exposes the node's state in Prometheus exposition format
+(memory-tier sizes, chain validity/height, RRC hit-rate, Markov graph size,
+vocab, validator count, membership version, mempool size, uptime). The
+`docker compose` stack includes **Prometheus** (scrapes all nodes at
+`/darm/metrics`) and **Grafana** (anonymous viewer enabled, datasource +
+DARM-ANN dashboard auto-provisioned):
+
+```bash
+docker compose up --build
+open http://localhost:3000           # Grafana → "DARM-ANN Cluster" dashboard
+open http://localhost:9090           # Prometheus
+```
 
 Persistence: `DARM_SNAPSHOT` (path), `DARM_SNAPSHOT_MS` (periodic save
 interval, default 60s) — the node restores on boot, snapshots periodically to

@@ -1,0 +1,12 @@
+# Prometheus scrape config for the DARM-ANN cluster.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: darm-ann
+    metrics_path: /darm/metrics
+    static_configs:
+      - targets: ["darm1:3001", "darm2:3002", "darm3:3003"]
+        labels:
+          cluster: darm-ann
