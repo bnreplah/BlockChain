@@ -49,3 +49,19 @@ groups:
         annotations:
           summary: "Low RRC hit-rate on {{ $labels.instance }}"
           description: "Rapid-retrieval cache hit-rate is low despite a populated LTM; consider warm-up tuning."
+
+      - alert: DarmTaskFailures
+        expr: increase(darm_tasks{status="failed"}[5m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Failed task(s) on {{ $labels.instance }}"
+          description: "One or more tracked operations failed in the last 5m. Check /darm/monitor."
+
+      - alert: DarmTaskBacklog
+        expr: darm_tasks{status="running"} > 10
+        for: 2m
+        labels: { severity: info }
+        annotations:
+          summary: "Task backlog on {{ $labels.instance }} ({{ $value }} running)"
+          description: "Many operations are running concurrently; the node may be saturated."

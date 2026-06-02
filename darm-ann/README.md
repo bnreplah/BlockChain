@@ -279,9 +279,11 @@ open http://localhost:9093           # Alertmanager
 ```
 
 **Alerting:** Prometheus evaluates `monitoring/alerts.yml` (node down, LTM/STM
-chain invalid, quorum-at-risk, mempool backlog, low RRC hit-rate) and routes
-firing alerts through **Alertmanager** (webhook receiver → `POST /darm/alerts`,
-viewable at `GET /darm/alerts`).
+chain invalid, quorum-at-risk, mempool backlog, low RRC hit-rate, **task
+failures**, **task backlog**) and routes firing alerts through **Alertmanager**
+(webhook receiver → `POST /darm/alerts`, viewable at `GET /darm/alerts`). The
+Grafana dashboard includes task panels (tasks-by-status, failures-in-5m,
+running-tasks gauge).
 
 Persistence: `DARM_SNAPSHOT` (path), `DARM_SNAPSHOT_MS` (periodic save
 interval, default 60s) — the node restores on boot, snapshots periodically to
@@ -322,17 +324,21 @@ and `darm_tasks{status=...}` is exported to Prometheus.
 
 Optional, env-gated hardening (off by default for back-compat):
 
-- **Bearer-token auth** — set `DARM_AUTH_TOKEN`; all `/darm/*` endpoints then
-  require `Authorization: Bearer <token>` except `/darm/health` and
-  `/darm/metrics` (left open for probes/scraping). The CLI honours
-  `--token`/`DARM_TOKEN`.
+- **RBAC token auth** — scoped bearer tokens (`read` < `operator`). `read`
+  tokens may call GET endpoints; mutations (POST/DELETE) require `operator`.
+  Configure with `DARM_TOKENS="tokA:operator,tokB:read"` (or the legacy
+  `DARM_AUTH_TOKEN`, which is operator-scope). `/darm/health`, `/darm/metrics`,
+  and `/darm/alerts` stay open (probes/scrape/Alertmanager). 401 on unknown
+  token, 403 on insufficient scope. The CLI honours `--token`/`DARM_TOKEN`.
 - **Server TLS** — set `DARM_TLS_CERT` + `DARM_TLS_KEY` to serve the API over
   HTTPS (CLI: `--tls`/`DARM_TLS`).
 - **Consensus mTLS** — `TcpTransport({ tls: { key, cert, ca } })` encrypts and
   mutually authenticates inter-node consensus traffic; only nodes presenting a
   CA-signed cert can join the transport (`consensus/certs.js` generates a test
   PKI via `openssl`). Verified: authenticated peers exchange messages, plain-TCP
-  dialers are rejected.
+  dialers are rejected. The multi-process launcher enables it end-to-end with
+  `DARM_CLUSTER_MTLS=1 node darm-ann/cluster.js 4` (CA + per-node certs minted
+  per launch).
 
 ### Auto-remediation
 

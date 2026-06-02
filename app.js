@@ -9,19 +9,28 @@ const app = express(); //initialize the express object
 const jwt = require('jsonwebtoken');//get the json web token models
 app.use(express.json());//use json to parse the requests
 
-// Optional bearer-token auth for the DARM-ANN API. Enabled by setting
-// DARM_AUTH_TOKEN; off by default (back-compat). Health/metrics stay open so
-// container probes and Prometheus can reach them without a credential.
-const DARM_AUTH_TOKEN = process.env.DARM_AUTH_TOKEN || '';
-const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/metrics']);
+// RBAC token auth for the DARM-ANN API. Off by default (back-compat). Tokens
+// carry a scope; routes require a minimum scope:
+//   read     → GET endpoints (state, query, tasks, validators, mempool, …)
+//   operator → mutating endpoints (teach, observe, tx, replay, validators add/del…)
+// Configure via either:
+//   DARM_AUTH_TOKEN=<tok>                  (single operator-scope token; legacy)
+//   DARM_TOKENS="tokA:operator,tokB:read"  (multiple scoped tokens)
+// Health + metrics stay open for probes/scraping. Alertmanager webhook is open
+// so Alertmanager (no bearer support by default) can deliver alerts.
+const rbac = require('./darm-ann/rbac');
+const darmTokenScopes = rbac.buildTokenScopes({ authToken: process.env.DARM_AUTH_TOKEN || '', tokensSpec: process.env.DARM_TOKENS || '' });
+const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/metrics', '/darm/alerts']);
 app.use((req, res, next)=>{
-    if (!DARM_AUTH_TOKEN) return next();              // auth disabled
+    if (darmTokenScopes.size === 0) return next();     // auth disabled
     if (!req.path.startsWith('/darm/')) return next(); // only guard DARM API
-    if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape exempt
+    if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape/alerts exempt
     const h = req.headers['authorization'] || '';
     const token = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || '');
-    if (token === DARM_AUTH_TOKEN) return next();
-    return res.status(401).json({ error: 'unauthorized', hint: 'set Authorization: Bearer <DARM_AUTH_TOKEN>' });
+    const result = rbac.authorize(darmTokenScopes, req.method, token);
+    if (!result.ok) return res.status(result.status).json({ error: result.error, need: result.need, have: result.have, hint: 'Authorization: Bearer <token>' });
+    req.darmScope = result.scope;
+    next();
 });
 
 const authRoute = require('./routes/auth');//require the middle ware for user use /api/user

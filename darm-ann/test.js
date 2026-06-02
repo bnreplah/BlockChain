@@ -980,6 +980,35 @@ section('persistence (save / load)');
 // ───────────────────────── metrics (Prometheus exposition) ─────────────────────────
 // ───────────────────────── throughput benchmark ─────────────────────────
 // ───────────────────────── task manager (monitor) ─────────────────────────
+// ───────────────────────── RBAC (scoped tokens) ─────────────────────────
+section('rbac (scoped token authorization)');
+{
+  const rbac = require('./rbac');
+  test('parses single + multi token specs into scopes', () => {
+    const m = rbac.buildTokenScopes({ authToken: 'legacy', tokensSpec: 'a:read, b:operator, c' });
+    assert.strictEqual(m.get('legacy'), 'operator');
+    assert.strictEqual(m.get('a'), 'read');
+    assert.strictEqual(m.get('b'), 'operator');
+    assert.strictEqual(m.get('c'), 'operator'); // default when no scope
+  });
+  test('read scope: GET allowed, POST forbidden (403)', () => {
+    const m = rbac.buildTokenScopes({ tokensSpec: 'r:read' });
+    assert.strictEqual(rbac.authorize(m, 'GET', 'r').status, 200);
+    const post = rbac.authorize(m, 'POST', 'r');
+    assert.ok(!post.ok && post.status === 403 && post.need === 'operator' && post.have === 'read');
+  });
+  test('operator scope: GET and POST allowed', () => {
+    const m = rbac.buildTokenScopes({ tokensSpec: 'o:operator' });
+    assert.strictEqual(rbac.authorize(m, 'GET', 'o').status, 200);
+    assert.strictEqual(rbac.authorize(m, 'POST', 'o').status, 200);
+  });
+  test('unknown token → 401; empty config → auth disabled (allow)', () => {
+    const m = rbac.buildTokenScopes({ tokensSpec: 'o:operator' });
+    assert.strictEqual(rbac.authorize(m, 'GET', 'nope').status, 401);
+    assert.ok(rbac.authorize(new Map(), 'POST', '').ok); // disabled passes through
+  });
+}
+
 section('taskManager (operation tracking)');
 {
   const TaskManager = require('./taskManager');

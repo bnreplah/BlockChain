@@ -23,6 +23,8 @@ jobs:
         run: timeout 40 node darm-ann/cluster.js 4 20100
       - name: Live node-join + shared-LTM RSM over TCP (smoke)
         run: timeout 50 node darm-ann/clusterRSM.js 4 20200
+      - name: mTLS consensus cluster (encrypted + mutually authenticated)
+        run: DARM_CLUSTER_MTLS=1 timeout 50 node darm-ann/cluster.js 4 20500
       - name: Throughput benchmark (correctness under load)
         run: node darm-ann/bench.js 100 4 10
       - name: Validate Prometheus alert rules
