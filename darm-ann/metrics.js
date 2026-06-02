@@ -35,6 +35,12 @@ function render(darm, extra = {}) {
   if (extra.mempoolSize != null) out += line('darm_mempool_size', 'Pending transactions in the gossip mempool', 'gauge', extra.mempoolSize);
   if (extra.uptimeSeconds != null) out += line('darm_uptime_seconds', 'Process uptime in seconds', 'counter', Math.floor(extra.uptimeSeconds));
   if (extra.networkNodes != null) out += line('darm_network_peers', 'Registered network peer count', 'gauge', extra.networkNodes);
+  if (extra.tasks) {
+    out += `# HELP darm_tasks Tracked operations by status\n# TYPE darm_tasks gauge\n`;
+    for (const status of ['queued', 'running', 'done', 'failed']) {
+      out += `darm_tasks{status="${status}"} ${extra.tasks[status] || 0}\n`;
+    }
+  }
   return out;
 }
 

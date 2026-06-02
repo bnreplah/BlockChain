@@ -258,8 +258,9 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET /darm/mempool` · `GET /darm/navigate?q=` · `GET /darm/state` ·
 `GET /darm/health` · `GET|POST /darm/validators` ·
 `DELETE /darm/validators/:id` · `GET /darm/metrics` (Prometheus) ·
-`GET|POST /darm/alerts` (Alertmanager webhook) · `GET /darm/dashboard`
-(operator UI).
+`GET|POST /darm/alerts` (Alertmanager webhook) ·
+`GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·
+`GET /darm/monitor` (task monitor) · `GET /darm/dashboard` (operator UI).
 
 ### Observability (Prometheus + Grafana)
 
@@ -298,17 +299,47 @@ node darm-ann/bench.js 200 4 10      # 200 txns, 4 validators, batch 10/height
 # → ~1000+ txns/sec, p50 ~8ms/height, ltmAgreement: true   (npm run darm:bench)
 ```
 
-### Security (TLS + token auth)
+### HTTP load test
 
-The server supports optional, env-gated hardening (off by default for
-back-compat):
+`darm-ann/loadtest.js` drives **real HTTP endpoints** (round-robins across one
+or more node URLs) at a configurable concurrency, reporting req/s, success rate,
+and latency p50/p95/p99:
+
+```bash
+node darm-ann/loadtest.js 500 25 --urls http://localhost:3001,http://localhost:3002 --mode mixed
+# → ~1500 req/s, successRate 1.0, p50 ~13ms, p99 ~39ms   (npm run darm:loadtest)
+```
+
+### Task monitor
+
+`GET /darm/monitor` is a live **task manager view**: long-running operations
+(replay, triage, self-correct, snapshot, auto-remediation, background autorun
+cycles) are tracked as tasks with status + progress, streamed to the browser
+over Server-Sent Events (`GET /darm/tasks/stream`). `GET /darm/tasks` lists them
+and `darm_tasks{status=...}` is exported to Prometheus.
+
+### Security
+
+Optional, env-gated hardening (off by default for back-compat):
 
 - **Bearer-token auth** — set `DARM_AUTH_TOKEN`; all `/darm/*` endpoints then
   require `Authorization: Bearer <token>` except `/darm/health` and
-  `/darm/metrics` (left open for probes/scraping).
-- **TLS** — set `DARM_TLS_CERT` + `DARM_TLS_KEY` to serve over HTTPS.
+  `/darm/metrics` (left open for probes/scraping). The CLI honours
+  `--token`/`DARM_TOKEN`.
+- **Server TLS** — set `DARM_TLS_CERT` + `DARM_TLS_KEY` to serve the API over
+  HTTPS (CLI: `--tls`/`DARM_TLS`).
+- **Consensus mTLS** — `TcpTransport({ tls: { key, cert, ca } })` encrypts and
+  mutually authenticates inter-node consensus traffic; only nodes presenting a
+  CA-signed cert can join the transport (`consensus/certs.js` generates a test
+  PKI via `openssl`). Verified: authenticated peers exchange messages, plain-TCP
+  dialers are rejected.
 
-The CLI honours `--token`/`DARM_TOKEN` and `--tls`/`DARM_TLS`.
+### Auto-remediation
+
+When `DARM_AUTOREMEDIATE` is on (default), the Alertmanager webhook receiver
+(`POST /darm/alerts`) maps actionable firing alerts to remediation actions —
+e.g. a `DarmLTMChainInvalid` / `DarmSTMChainInvalid` alert triggers a tracked
+`self-correct` task — closing the detect→repair loop automatically.
 
 ## Operate it — CLI + dashboard
 

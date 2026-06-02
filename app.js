@@ -88,6 +88,12 @@ if (DARM_SNAPSHOT && fs.existsSync(DARM_SNAPSHOT)) {
 darm.autorun(); // background RCE replay + STM triage + self-correction
 console.log("[DARM-ANN] memory network online ->", JSON.stringify(darm.state().tiers));
 
+// Task manager: tracks long-running operations so they can be monitored live.
+const TaskManager = require('./darm-ann/taskManager');
+const darmTasks = new TaskManager({ max: 200 });
+// Record autorun background cycles as tasks so the monitor shows ongoing work.
+darm._taskHook = (type, result) => { const t = darmTasks.create(type, { label: type + ' (auto)' }); darmTasks.start(t.id); darmTasks.finish(t.id, result); };
+
 // Periodic durable snapshot to the persistent volume (production deploy). The
 // interval (ms) is DARM_SNAPSHOT_MS; 0 disables. Default 60s when a path is set.
 const DARM_SNAPSHOT_MS = process.env.DARM_SNAPSHOT_MS != null ? Number(process.env.DARM_SNAPSHOT_MS) : (DARM_SNAPSHOT ? 60000 : 0);
@@ -265,13 +271,24 @@ app.post("/darm/refute", (req, res)=>{
 });
 
 // replay: run one RCE consolidation cycle (nominates STM survivors to LTM)
-app.post("/darm/replay", (req, res)=>{
-    res.json(darm.replay());
+app.post("/darm/replay", async (req, res)=>{
+    const task = await darmTasks.run('replay', { label: 'RCE replay cycle' }, async (ctl)=>{
+        ctl.step('starting replay');
+        const r = darm.replay();
+        ctl.step(`replayed ${r.replayed}, promoted ${r.promoted}`, 1);
+        return r;
+    });
+    res.json({ task: task.id, ...task.result });
 });
 
 // triage: run STM lifecycle management
-app.post("/darm/triage", (req, res)=>{
-    res.json(darm.triage());
+app.post("/darm/triage", async (req, res)=>{
+    const task = await darmTasks.run('triage', { label: 'STM triage' }, async (ctl)=>{
+        const r = darm.triage();
+        ctl.step(`expired ${r.expired||0}, promoted ${r.promotedArchived||0}`, 1);
+        return r;
+    });
+    res.json({ task: task.id, ...task.result });
 });
 
 // state: Sigma(t) snapshot of tier occupancies and the associative graph
@@ -285,16 +302,50 @@ app.get("/darm/navigate", (req, res)=>{
 });
 
 // self-correct: validate/repair chains, prune TTL, supersede contradictions
-app.post("/darm/selfcorrect", (req, res)=>{
-    res.json(darm.selfCorrect());
+app.post("/darm/selfcorrect", async (req, res)=>{
+    const task = await darmTasks.run('selfcorrect', { label: 'self-correction pass' }, async (ctl)=>{
+        const r = darm.selfCorrect();
+        ctl.step(`repaired STM ${r.stmRepaired}, LTM ${r.ltmRepaired}, superseded ${r.superseded}`, 1);
+        return r;
+    });
+    res.json({ task: task.id, ...task.result });
 });
 
 // snapshot: persist durable state to disk (DARM_SNAPSHOT or body.path)
-app.post("/darm/snapshot", (req, res)=>{
+app.post("/darm/snapshot", async (req, res)=>{
     const path = (req.body && req.body.path) || DARM_SNAPSHOT;
     if(!path) return res.status(400).json({error: "no snapshot path; set DARM_SNAPSHOT or body.path"});
-    darm.save(path);
-    res.json({note: "snapshot saved", path});
+    const task = await darmTasks.run('snapshot', { label: 'persist snapshot' }, async (ctl)=>{
+        darm.save(path); ctl.step('saved to ' + path, 1); return { path };
+    });
+    res.json({note: "snapshot saved", path, task: task.id});
+});
+
+// tasks: list tracked operations (task manager) + summary
+app.get("/darm/tasks", (req, res)=>{
+    res.json({ summary: darmTasks.summary(), tasks: darmTasks.list({ status: req.query.status || null, limit: Number(req.query.limit) || 50 }) });
+});
+// tasks/stream: Server-Sent Events feed of live task updates for the monitor.
+// Registered BEFORE /darm/tasks/:id so "stream" is not captured as an id.
+app.get("/darm/tasks/stream", (req, res)=>{
+    res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+    res.flushHeaders && res.flushHeaders();
+    res.write(`event: snapshot\ndata: ${JSON.stringify(darmTasks.list({ limit: 50 }))}\n\n`);
+    const onUpdate = (task)=>{ res.write(`event: task\ndata: ${JSON.stringify(task)}\n\n`); };
+    darmTasks.on('update', onUpdate);
+    const keepalive = setInterval(()=>res.write(': keepalive\n\n'), 15000);
+    if (keepalive.unref) keepalive.unref();
+    req.on('close', ()=>{ clearInterval(keepalive); darmTasks.removeListener('update', onUpdate); });
+});
+app.get("/darm/tasks/:id", (req, res)=>{
+    const t = darmTasks.get(req.params.id);
+    if(!t) return res.status(404).json({error: "task not found"});
+    res.json(t);
+});
+
+// monitor: task manager / monitor view (operator can watch progress live)
+app.get(["/darm/monitor"], (req, res)=>{
+    res.sendFile("./darm-ann/monitor.html", {root: __dirname});
 });
 
 // health: liveness/readiness probe for deployment
@@ -327,19 +378,40 @@ app.get("/darm/mempool", (req, res)=>{
     res.json({ size: darmMempool.size(), pending: darmMempool.take(50).map(t => ({ id: t.id, type: t.type, origin: t.origin })) });
 });
 
-// alerts: Alertmanager webhook receiver. Records the most recent alerts so they
-// surface in /darm/state and can drive automated responses.
+// alerts: Alertmanager webhook receiver. Records recent alerts and, when
+// auto-remediation is enabled (DARM_AUTOREMEDIATE!=0), runs a remediation task
+// in response to actionable firing alerts (e.g. a chain-invalid alert triggers
+// a self-correction pass). Each remediation is tracked on the monitor.
+const DARM_AUTOREMEDIATE = process.env.DARM_AUTOREMEDIATE !== '0';
 const darmAlerts = [];
+function remediate(alertName){
+    // Map an alert to a remediation action; return a task or null.
+    if (alertName === 'DarmLTMChainInvalid' || alertName === 'DarmSTMChainInvalid') {
+        return darmTasks.run('remediate', { label: `auto-remediate ${alertName}`, meta: { alert: alertName } }, async (ctl)=>{
+            ctl.step('running self-correction in response to ' + alertName);
+            const r = darm.selfCorrect();
+            ctl.step(`repaired STM ${r.stmRepaired}, LTM ${r.ltmRepaired}`, 1);
+            return r;
+        });
+    }
+    return null;
+}
 app.post("/darm/alerts", (req, res)=>{
     const incoming = (req.body && req.body.alerts) || [];
+    const remediations = [];
     for (const a of incoming) {
-        darmAlerts.unshift({ status: a.status, name: a.labels && a.labels.alertname, severity: a.labels && a.labels.severity, instance: a.labels && a.labels.instance, at: Date.now() });
+        const name = a.labels && a.labels.alertname;
+        darmAlerts.unshift({ status: a.status, name, severity: a.labels && a.labels.severity, instance: a.labels && a.labels.instance, at: Date.now() });
+        if (DARM_AUTOREMEDIATE && a.status === 'firing') {
+            const task = remediate(name);
+            if (task) remediations.push(name);
+        }
     }
     while (darmAlerts.length > 50) darmAlerts.pop();
-    console.log(`[DARM-ANN] received ${incoming.length} alert(s)`);
-    res.json({ note: "alerts received", count: incoming.length });
+    console.log(`[DARM-ANN] received ${incoming.length} alert(s); remediated ${remediations.length}`);
+    res.json({ note: "alerts received", count: incoming.length, remediated: remediations });
 });
-app.get("/darm/alerts", (req, res)=>{ res.json({ recent: darmAlerts.slice(0, 20) }); });
+app.get("/darm/alerts", (req, res)=>{ res.json({ recent: darmAlerts.slice(0, 20), autoRemediate: DARM_AUTOREMEDIATE }); });
 
 // metrics: Prometheus exposition format for scraping (Grafana dashboards)
 const darmMetrics = require('./darm-ann/metrics');
@@ -349,6 +421,7 @@ app.get("/darm/metrics", (req, res)=>{
         mempoolSize: darmMempool.size(),
         uptimeSeconds: (Date.now() - darmStartTime) / 1000,
         networkNodes: (Bcoin.networkNode || []).length,
+        tasks: darmTasks.summary(),
     });
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(text);

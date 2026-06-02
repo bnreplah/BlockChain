@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DARM-ANN — Task Monitor</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#c9d1d9; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --run:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); }
+  .dot.live { background:var(--ok); }
+  main { max-width:1000px; margin:0 auto; padding:18px; }
+  .summary { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+  .chip { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:6px 14px; }
+  .chip b { color:var(--accent); }
+  .chip.running b { color:var(--run); }
+  .chip.done b { color:var(--ok); }
+  .chip.failed b { color:var(--bad); }
+  .controls { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+  button { cursor:pointer; font:inherit; background:#21262d; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 12px; }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  .task { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+  .task-head { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .task-title { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:1px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); }
+  .badge.queued { color:#8b949e; }
+  .badge.running { color:var(--run); border-color:var(--run); }
+  .badge.done { color:var(--ok); border-color:var(--ok); }
+  .badge.failed { color:var(--bad); border-color:var(--bad); }
+  .bar { height:8px; background:#0d1117; border:1px solid var(--line); border-radius:6px; margin:8px 0; overflow:hidden; }
+  .bar > span { display:block; height:100%; background:var(--run); transition:width .3s; }
+  .bar.done > span { background:var(--ok); }
+  .bar.failed > span { background:var(--bad); }
+  .meta { color:#8b949e; font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
+  .steps { margin-top:8px; font-size:12px; color:#8b949e; max-height:90px; overflow:auto; }
+  .steps div { padding:1px 0; }
+  .err { color:var(--bad); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="live-dot"></span>
+  <h1>DARM-ANN — Task Monitor</h1>
+  <span class="meta" id="conn">connecting…</span>
+  <span style="margin-left:auto"><a href="/darm/dashboard">dashboard →</a></span>
+</header>
+<main>
+  <div class="summary" id="summary"></div>
+  <div class="controls">
+    <button onclick="op('replay')">Run Replay</button>
+    <button onclick="op('triage')">Run Triage</button>
+    <button onclick="op('selfcorrect')">Self-correct</button>
+    <button onclick="op('snapshot')">Snapshot</button>
+    <button onclick="refreshAll()">Refresh</button>
+    <label class="meta"><input type="checkbox" id="hideDone"> hide completed</label>
+  </div>
+  <div id="tasks"></div>
+</main>
+<script>
+const $ = (id)=>document.getElementById(id);
+const tasks = new Map();
+const fmtDur = (t)=>{ if(!t.startedAt) return ''; const end = t.endedAt||Date.now(); return ((end-t.startedAt)/1000).toFixed(2)+'s'; };
+
+function token(){ return localStorage.getItem('darmToken') || ''; }
+function authHeaders(){ const h={}; const t=token(); if(t) h['Authorization']='Bearer '+t; return h; }
+
+async function op(kind){
+  try { await fetch('/darm/'+kind, { method:'POST', headers: { 'Content-Type':'application/json', ...authHeaders() }, body:'{}' }); }
+  catch(e){ /* surfaced via stream */ }
+}
+
+function render(){
+  const hide = $('hideDone').checked;
+  const arr = [...tasks.values()].sort((a,b)=> (b.startedAt||b.createdAt)-(a.startedAt||a.createdAt));
+  const sum = { queued:0, running:0, done:0, failed:0 };
+  for (const t of arr) sum[t.status] = (sum[t.status]||0)+1;
+  $('summary').innerHTML = ['running','queued','done','failed'].map(s=>
+    `<span class="chip ${s}">${s} <b>${sum[s]||0}</b></span>`).join('');
+  $('tasks').innerHTML = arr.filter(t=> !(hide && t.status==='done')).map(t=>{
+    const pct = Math.round((t.progress||0)*100);
+    const steps = (t.steps||[]).slice(-4).map(s=>`<div>• ${s.message}</div>`).join('');
+    return `<div class="task">
+      <div class="task-head">
+        <span class="task-title">${t.label||t.type}</span>
+        <span class="badge ${t.status}">${t.status}</span>
+      </div>
+      <div class="bar ${t.status}"><span style="width:${pct}%"></span></div>
+      <div class="meta"><span>id ${t.id}</span><span>${pct}%</span><span>${fmtDur(t)}</span>${t.error?`<span class="err">${t.error}</span>`:''}</div>
+      <div class="steps">${steps}</div>
+    </div>`;
+  }).join('') || '<div class="meta">No tasks yet. Trigger an operation above.</div>';
+}
+
+function upsert(t){ tasks.set(t.id, t); render(); }
+
+async function refreshAll(){
+  try { const r = await fetch('/darm/tasks', { headers: authHeaders() }); const j = await r.json(); (j.tasks||[]).forEach(upsert); render(); } catch(e){}
+}
+
+function connect(){
+  const es = new EventSource('/darm/tasks/stream');
+  es.addEventListener('snapshot', (e)=>{ JSON.parse(e.data).forEach(upsert); $('live-dot').className='dot live'; $('conn').textContent='live'; });
+  es.addEventListener('task', (e)=>{ upsert(JSON.parse(e.data)); });
+  es.onerror = ()=>{ $('live-dot').className='dot'; $('conn').textContent='reconnecting…'; };
+}
+refreshAll();
+connect();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>

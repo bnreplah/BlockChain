@@ -334,9 +334,12 @@ class DarmAnn {
   autorun({ replayMs = 5 * 60 * 1000, triageMs = 30 * 60 * 1000, correctMs = 15 * 60 * 1000 } = {}) {
     this.stop();
     this._timers = [];
-    this._timers.push(setInterval(() => this.replay(), replayMs));
-    this._timers.push(setInterval(() => this.triage(), triageMs));
-    this._timers.push(setInterval(() => this.selfCorrect(), correctMs));
+    // _taskHook (optional, set by the server) records each background cycle so
+    // it appears on the task monitor.
+    const hooked = (type, fn) => () => { const r = fn(); if (this._taskHook) try { this._taskHook(type, r); } catch (_e) {} };
+    this._timers.push(setInterval(hooked('replay', () => this.replay()), replayMs));
+    this._timers.push(setInterval(hooked('triage', () => this.triage()), triageMs));
+    this._timers.push(setInterval(hooked('selfcorrect', () => this.selfCorrect()), correctMs));
     for (const t of this._timers) if (t.unref) t.unref();
     return this;
   }

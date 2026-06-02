@@ -78,6 +78,16 @@ jobs:
             -d '{"type":"memory","payload":{"claim":"gossip tx via http","reward":1,"epistemic":{"conf_cal":0.9,"u_ep":0.05}}}' >/dev/null
           SIZE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/mempool | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).size))")
           echo "mempool size: $SIZE"; test "$SIZE" -ge 1
+      - name: Monitor view + task tracking
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/darm/monitor)" = "200"
+          curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/replay >/dev/null
+          DONE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/tasks | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).summary.done||0))")
+          echo "completed tasks: $DONE"; test "$DONE" -ge 1
+      - name: HTTP load test (throughput + success rate)
+        run: node darm-ann/loadtest.js 300 20 --urls http://localhost:3001 --mode mixed --token ci-token
       - name: Tear down
         if: always()
         run: docker rm -f darm || true

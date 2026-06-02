@@ -979,6 +979,45 @@ section('persistence (save / load)');
 // ───────────────────────── facade integration ─────────────────────────
 // ───────────────────────── metrics (Prometheus exposition) ─────────────────────────
 // ───────────────────────── throughput benchmark ─────────────────────────
+// ───────────────────────── task manager (monitor) ─────────────────────────
+section('taskManager (operation tracking)');
+{
+  const TaskManager = require('./taskManager');
+  test('create → start → step → finish lifecycle with progress + events', () => {
+    const tm = new TaskManager();
+    const events = [];
+    tm.on('update', (t) => events.push(t.status));
+    const t = tm.create('replay', { label: 'x', total: 4 });
+    assert.strictEqual(t.status, 'queued');
+    tm.start(t.id);
+    tm.step(t.id, 'half', 2);
+    assert.strictEqual(tm.get(t.id).progress, 0.5);
+    tm.finish(t.id, { ok: true });
+    const done = tm.get(t.id);
+    assert.strictEqual(done.status, 'done');
+    assert.strictEqual(done.progress, 1);
+    assert.ok(done.result.ok);
+    assert.ok(events.includes('running') && events.includes('done'));
+  });
+  test('run() wraps an async fn; failures are captured', async () => {
+    const tm = new TaskManager();
+    const okTask = await tm.run('snapshot', { label: 's' }, async (ctl) => { ctl.step('working', 1); return 42; });
+    assert.strictEqual(okTask.result, 42);
+    let threw = false;
+    try { await tm.run('replay', {}, async () => { throw new Error('boom'); }); } catch (_e) { threw = true; }
+    assert.ok(threw);
+    const failed = tm.list({ status: 'failed' });
+    assert.ok(failed.length === 1 && failed[0].error === 'boom');
+  });
+  test('summary counts by status; list respects limit', () => {
+    const tm = new TaskManager();
+    for (let i = 0; i < 5; i++) tm.finish(tm.start(tm.create('triage').id).id);
+    const s = tm.summary();
+    assert.strictEqual(s.done, 5);
+    assert.strictEqual(tm.list({ limit: 2 }).length, 2);
+  });
+}
+
 section('bench (throughput pipeline)');
 {
   const { runBenchmark } = require('./bench');
@@ -1063,10 +1102,46 @@ async function tcpTest() {
   });
 }
 
+async function mtlsTest() {
+  section('consensus transport mTLS (encrypted + mutually authenticated)');
+  const { generatePKI, hasOpenSSL } = require('./consensus/certs');
+  if (!hasOpenSSL()) { test('mTLS (skipped: openssl unavailable)', () => assert.ok(true)); return; }
+  const { TcpTransport } = require('./consensus/transport');
+  const { ca, nodes, dir } = generatePKI(['v0', 'v1']);
+  const base = 18700 + Math.floor(Math.random() * 200);
+  const t0 = new TcpTransport({ nodeId: 'v0', port: base, tls: { key: nodes.v0.key, cert: nodes.v0.cert, ca } });
+  const t1 = new TcpTransport({ nodeId: 'v1', port: base + 1, tls: { key: nodes.v1.key, cert: nodes.v1.cert, ca } });
+  let got = null;
+  t1.connect('v1', (m) => { got = m; });
+  await t0.listen();
+  await t1.listen();
+  t0.addPeer('v1', '127.0.0.1', base + 1);
+  await t0.send('v0', 'v1', { type: 'PREVOTE', hello: 'mtls' });
+  await new Promise((r) => setTimeout(r, 300));
+
+  // An unauthenticated plain-TCP dialer must not be able to exchange app data.
+  const net = require('net');
+  let plainData = false;
+  await new Promise((r) => { const s = net.connect(base, '127.0.0.1', () => s.write('{"x":1}\n')); s.on('error', () => r()); s.on('data', () => { plainData = true; }); setTimeout(r, 400); });
+
+  t0.close();
+  t1.close();
+  try { require('fs').rmSync(dir, { recursive: true, force: true }); } catch (_e) {}
+  test('authenticated nodes exchange a message; unauthenticated dialer rejected', () => {
+    assert.ok(got && got.hello === 'mtls', 'mTLS peer received the consensus message');
+    assert.ok(!plainData, 'plain-TCP dialer got no application data');
+  });
+}
+
 tcpTest()
   .catch((e) => {
     failed += 1;
     console.log('  ✗ TCP consensus threw\n      ' + e.message);
+  })
+  .then(() => mtlsTest())
+  .catch((e) => {
+    failed += 1;
+    console.log('  ✗ mTLS transport threw\n      ' + e.message);
   })
   .finally(() => {
     console.log(`\n${passed} passed, ${failed} failed\n`);

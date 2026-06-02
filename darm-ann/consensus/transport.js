@@ -82,10 +82,16 @@ class InProcessBus {
 }
 
 class TcpTransport {
-  constructor({ nodeId, host = '127.0.0.1', port }) {
+  // `tls` enables mutually-authenticated TLS between nodes:
+  //   { key, cert, ca }  (PEM buffers/strings). When set, the listener requires
+  //   and verifies client certs (mTLS) and dialers present their own cert and
+  //   verify the server against the same CA — so only nodes holding a CA-signed
+  //   cert can join the consensus transport, and all traffic is encrypted.
+  constructor({ nodeId, host = '127.0.0.1', port, tls = null }) {
     this.nodeId = nodeId;
     this.host = host;
     this.port = port;
+    this.tls = tls;
     this.onMessage = null;
     this.peers = new Map(); // nodeId -> { host, port, socket }
     this.server = null;
@@ -103,8 +109,15 @@ class TcpTransport {
 
   listen() {
     return new Promise((resolve, reject) => {
-      this.server = net.createServer((socket) => this._attach(socket));
+      if (this.tls) {
+        const tls = require('tls');
+        const opts = { key: this.tls.key, cert: this.tls.cert, ca: this.tls.ca, requestCert: true, rejectUnauthorized: true };
+        this.server = tls.createServer(opts, (socket) => this._attach(socket));
+      } else {
+        this.server = net.createServer((socket) => this._attach(socket));
+      }
       this.server.on('error', reject);
+      this.server.on('tlsClientError', () => {}); // reject unauthenticated dialers quietly
       this.server.listen(this.port, this.host, () => resolve());
     });
   }
@@ -132,7 +145,15 @@ class TcpTransport {
   _socketFor(peer) {
     if (peer.socket && !peer.socket.destroyed) return Promise.resolve(peer.socket);
     return new Promise((resolve) => {
-      const s = net.connect(peer.port, peer.host, () => resolve(s));
+      let s;
+      if (this.tls) {
+        const tls = require('tls');
+        // servername must satisfy the peer cert; checkServerIdentity is relaxed
+        // because nodes are addressed by host:port, not DNS CN (auth is via CA).
+        s = tls.connect({ port: peer.port, host: peer.host, key: this.tls.key, cert: this.tls.cert, ca: this.tls.ca, rejectUnauthorized: true, checkServerIdentity: () => undefined }, () => resolve(s));
+      } else {
+        s = net.connect(peer.port, peer.host, () => resolve(s));
+      }
       s.on('error', () => resolve(null));
       peer.socket = s;
     });
