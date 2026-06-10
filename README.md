@@ -35,6 +35,11 @@ docker compose up --build   # 3-node cluster + Prometheus + Grafana dashboards
 #   Grafana: http://localhost:3000   ·   Prometheus: http://localhost:9090
 ```
 
+Kubernetes (StatefulSet + Services + Secret + ServiceMonitor) and a Helm chart
+live in [`deploy/`](deploy/README.md):
+`kubectl apply -f deploy/k8s/darm-ann.yaml` or
+`helm install darm deploy/helm/darm-ann`.
+
 CI (`.github/workflows/ci.yml`) runs the test suite, the consensus/RSM
 smoke runs, a Docker image build + `/darm/health` smoke, and a `docker compose`
 3-node cluster smoke.

@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "darm-ann.fullname" . }}
+  labels: {{- include "darm-ann.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "darm-ann.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "darm-ann.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "darm-ann.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: darm-ann
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - "node app.js {{ .Values.service.port }} http://$(POD_NAME).{{ include \"darm-ann.fullname\" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: PORT, value: {{ .Values.service.port | quote }} }
+            - { name: DARM_SNAPSHOT, value: {{ .Values.config.snapshotPath | quote }} }
+            - { name: DARM_SNAPSHOT_MS, value: {{ .Values.config.snapshotIntervalMs | quote }} }
+            - { name: DARM_MIN_AGE_MS, value: {{ .Values.config.minAgeMs | quote }} }
+            - { name: DARM_AUDIT_FILE, value: {{ .Values.config.auditFile | quote }} }
+            - { name: DARM_RATE_CAPACITY, value: {{ .Values.config.rateCapacity | quote }} }
+            - { name: DARM_RATE_PER_SEC, value: {{ .Values.config.ratePerSec | quote }} }
+            - { name: DARM_AUTOREMEDIATE, value: {{ .Values.config.autoRemediate | quote }} }
+            - name: DARM_TOKENS
+              valueFrom: { secretKeyRef: { name: {{ include "darm-ann.fullname" . }}-tokens, key: DARM_TOKENS } }
+            - name: DARM_CLUSTER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "darm-ann.fullname" . }}-tokens, key: DARM_CLUSTER_TOKEN } }
+          readinessProbe:
+            httpGet: { path: /darm/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /darm/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

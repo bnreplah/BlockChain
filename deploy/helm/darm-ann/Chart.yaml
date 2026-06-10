@@ -1,0 +1,13 @@
+apiVersion: v2
+name: darm-ann
+description: DARM-ANN distributed memory network — StatefulSet, services, secret, and ServiceMonitor.
+type: application
+version: 0.1.0
+appVersion: "6.0"
+keywords:
+  - blockchain
+  - consensus
+  - memory
+  - darm-ann
+maintainers:
+  - name: Cybopsec Research

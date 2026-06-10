@@ -1,0 +1,42 @@
+# Default values for the darm-ann chart.
+replicaCount: 3
+
+image:
+  repository: darm-ann
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 3001
+
+# API tokens. Provide your own; empty disables auth (not recommended in prod).
+tokens:
+  # "operator-token:operator,read-token:read"
+  api: "change-me-operator:operator,change-me-read:read"
+  cluster: "change-me-cluster"
+
+config:
+  snapshotPath: /data/node.json
+  snapshotIntervalMs: "60000"
+  minAgeMs: "60000"
+  auditFile: /data/audit.log
+  rateCapacity: "120"
+  ratePerSec: "60"
+  autoRemediate: "1"
+
+persistence:
+  enabled: true
+  size: 1Gi
+  # storageClass: ""
+
+resources:
+  requests: { cpu: "100m", memory: "128Mi" }
+  limits: { cpu: "1", memory: "512Mi" }
+
+# Create a Prometheus Operator ServiceMonitor (requires the operator CRDs).
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  labels: {}
+
+terminationGracePeriodSeconds: 20

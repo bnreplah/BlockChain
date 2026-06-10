@@ -29,6 +29,13 @@ jobs:
         run: node darm-ann/bench.js 100 4 10
       - name: Validate Prometheus alert rules
         run: docker run --rm -v "$PWD/monitoring:/m" --entrypoint promtool prom/prometheus:latest check rules /m/alerts.yml
+      - name: Validate Kubernetes manifests parse
+        run: python3 -c "import yaml,sys; list(yaml.safe_load_all(open('deploy/k8s/darm-ann.yaml'))); print('k8s manifest OK')"
+      - name: Lint Helm chart
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm lint deploy/helm/darm-ann
+          helm template darm deploy/helm/darm-ann >/dev/null && echo "helm template OK"
 
   docker-smoke:
     name: Docker build + health smoke

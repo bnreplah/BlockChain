@@ -260,7 +260,8 @@ partitioned minority, and **safety** under a full network split (no side with a
 `DELETE /darm/validators/:id` · `GET /darm/metrics` (Prometheus) ·
 `GET|POST /darm/alerts` (Alertmanager webhook) ·
 `GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·
-`GET /darm/monitor` (task monitor) · `GET /darm/dashboard` (operator UI).
+`GET /darm/monitor` (task monitor) · `GET /darm/audit` (operator action trail) ·
+`GET /darm/dashboard` (operator UI).
 
 ### Observability (Prometheus + Grafana)
 
@@ -339,6 +340,19 @@ Optional, env-gated hardening (off by default for back-compat):
   dialers are rejected. The multi-process launcher enables it end-to-end with
   `DARM_CLUSTER_MTLS=1 node darm-ann/cluster.js 4` (CA + per-node certs minted
   per launch).
+- **Rate limiting** — per-token (or per-IP) token bucket
+  (`DARM_RATE_CAPACITY`, `DARM_RATE_PER_SEC`); 429 + `Retry-After` when exceeded.
+- **Audit log** — every mutating action is recorded (actor, scope, method, path,
+  status), readable at `GET /darm/audit` and optionally persisted
+  (`DARM_AUDIT_FILE`).
+- **Inter-node auth** — HTTP gossip carries `DARM_CLUSTER_TOKEN` (operator
+  scope) so peer relays authenticate when auth is enabled.
+
+### Deployment
+
+See [`deploy/`](../deploy/README.md): Docker Compose, plain Kubernetes manifests
+(`deploy/k8s/darm-ann.yaml` — StatefulSet + Services + Secret + ServiceMonitor),
+and a Helm chart (`deploy/helm/darm-ann`).
 
 ### Auto-remediation
 

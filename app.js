@@ -19,17 +19,46 @@ app.use(express.json());//use json to parse the requests
 // Health + metrics stay open for probes/scraping. Alertmanager webhook is open
 // so Alertmanager (no bearer support by default) can deliver alerts.
 const rbac = require('./darm-ann/rbac');
+const RateLimiter = require('./darm-ann/rateLimiter');
+const AuditLog = require('./darm-ann/auditLog');
 const darmTokenScopes = rbac.buildTokenScopes({ authToken: process.env.DARM_AUTH_TOKEN || '', tokensSpec: process.env.DARM_TOKENS || '' });
+// Inter-node cluster token is accepted as operator scope (gossip/state-sync).
+if (process.env.DARM_CLUSTER_TOKEN) darmTokenScopes.set(process.env.DARM_CLUSTER_TOKEN, 'operator');
 const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/metrics', '/darm/alerts']);
+// Per-token (or per-IP when anonymous) token-bucket rate limiter.
+const DARM_RL_CAP = Number(process.env.DARM_RATE_CAPACITY || 120);
+const DARM_RL_RPS = Number(process.env.DARM_RATE_PER_SEC || 60);
+const darmRateLimiter = new RateLimiter({ capacity: DARM_RL_CAP, refillPerSec: DARM_RL_RPS });
+// Audit trail of operator actions (mutations). DARM_AUDIT_FILE persists it.
+const darmAudit = new AuditLog({ file: process.env.DARM_AUDIT_FILE || null, max: 2000 });
+function tokenOf(req){ const h = req.headers['authorization'] || ''; return h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || ''); }
 app.use((req, res, next)=>{
-    if (darmTokenScopes.size === 0) return next();     // auth disabled
     if (!req.path.startsWith('/darm/')) return next(); // only guard DARM API
     if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape/alerts exempt
-    const h = req.headers['authorization'] || '';
-    const token = h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || '');
-    const result = rbac.authorize(darmTokenScopes, req.method, token);
-    if (!result.ok) return res.status(result.status).json({ error: result.error, need: result.need, have: result.have, hint: 'Authorization: Bearer <token>' });
-    req.darmScope = result.scope;
+    const token = tokenOf(req);
+    // Auth (RBAC) — skipped entirely when no tokens configured.
+    if (darmTokenScopes.size > 0) {
+        const result = rbac.authorize(darmTokenScopes, req.method, token);
+        if (!result.ok) {
+            if (req.method !== 'GET') darmAudit.record({ actor: token ? 'token:'+token.slice(0,4)+'…' : (req.ip||'anon'), action: 'auth-denied', method: req.method, path: req.path, status: result.status });
+            return res.status(result.status).json({ error: result.error, need: result.need, have: result.have, hint: 'Authorization: Bearer <token>' });
+        }
+        req.darmScope = result.scope;
+    }
+    // Rate limit, keyed by token if present else client IP.
+    const key = token || req.ip || 'anon';
+    const rl = darmRateLimiter.allow(key);
+    res.set('X-RateLimit-Remaining', String(rl.remaining));
+    if (!rl.ok) {
+        res.set('Retry-After', String(Math.ceil(rl.retryAfterMs / 1000)));
+        return res.status(429).json({ error: 'rate_limited', retryAfterMs: rl.retryAfterMs });
+    }
+    // Audit mutating actions (record outcome once the response finishes).
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.on('finish', ()=>{
+            darmAudit.record({ actor: token ? 'token:'+token.slice(0,4)+'…' : (req.ip||'anon'), scope: req.darmScope || null, action: req.path.replace('/darm/',''), method: req.method, path: req.path, status: res.statusCode });
+        });
+    }
     next();
 });
 
@@ -139,10 +168,14 @@ const darmMempool = new Mempool({ nodeId: n0deAddress, fanout: 4, ttl: 4, onTx: 
     }
 }});
 // HTTP gossip: forward a tx to each registered network node's /darm/tx endpoint.
+// Inter-node traffic carries the cluster token so peers can authenticate it when
+// auth is enabled (DARM_CLUSTER_TOKEN; falls back to the legacy auth token).
+const DARM_CLUSTER_TOKEN = process.env.DARM_CLUSTER_TOKEN || process.env.DARM_AUTH_TOKEN || '';
 function gossipTxToPeers(tx, ttl) {
     if (ttl <= 0) return;
+    const headers = DARM_CLUSTER_TOKEN ? { Authorization: 'Bearer ' + DARM_CLUSTER_TOKEN } : {};
     (Bcoin.networkNode || []).forEach((peerUrl) => {
-        rp({ uri: peerUrl + '/darm/tx', method: 'POST', body: { tx, ttl: ttl - 1 }, json: true }).catch(() => {});
+        rp({ uri: peerUrl + '/darm/tx', method: 'POST', headers, body: { tx, ttl: ttl - 1 }, json: true }).catch(() => {});
     });
 }
 
@@ -355,6 +388,11 @@ app.get("/darm/tasks/:id", (req, res)=>{
 // monitor: task manager / monitor view (operator can watch progress live)
 app.get(["/darm/monitor"], (req, res)=>{
     res.sendFile("./darm-ann/monitor.html", {root: __dirname});
+});
+
+// audit: operator action trail (requires read scope when auth is on)
+app.get("/darm/audit", (req, res)=>{
+    res.json({ size: darmAudit.size(), entries: darmAudit.list({ limit: Number(req.query.limit) || 100, action: req.query.action || null }) });
 });
 
 // health: liveness/readiness probe for deployment

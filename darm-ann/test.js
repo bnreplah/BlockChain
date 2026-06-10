@@ -981,6 +981,56 @@ section('persistence (save / load)');
 // ───────────────────────── throughput benchmark ─────────────────────────
 // ───────────────────────── task manager (monitor) ─────────────────────────
 // ───────────────────────── RBAC (scoped tokens) ─────────────────────────
+// ───────────────────────── rate limiter ─────────────────────────
+section('rateLimiter (token bucket)');
+{
+  const RateLimiter = require('./rateLimiter');
+  test('allows up to capacity then blocks with retryAfter', () => {
+    let t = 1000;
+    const rl = new RateLimiter({ capacity: 3, refillPerSec: 1, now: () => t });
+    assert.ok(rl.allow('k').ok);
+    assert.ok(rl.allow('k').ok);
+    assert.ok(rl.allow('k').ok);
+    const blocked = rl.allow('k');
+    assert.ok(!blocked.ok && blocked.retryAfterMs > 0);
+  });
+  test('refills over time', () => {
+    let t = 0;
+    const rl = new RateLimiter({ capacity: 2, refillPerSec: 2, now: () => t });
+    rl.allow('k'); rl.allow('k');
+    assert.ok(!rl.allow('k').ok, 'empty bucket blocks');
+    t = 1000; // 1s → +2 tokens
+    assert.ok(rl.allow('k').ok, 'refilled after 1s');
+  });
+  test('keys are independent', () => {
+    let t = 0;
+    const rl = new RateLimiter({ capacity: 1, refillPerSec: 1, now: () => t });
+    assert.ok(rl.allow('a').ok);
+    assert.ok(rl.allow('b').ok, 'different key has its own bucket');
+    assert.ok(!rl.allow('a').ok);
+  });
+}
+
+// ───────────────────────── audit log ─────────────────────────
+section('auditLog (operator action trail)');
+{
+  const AuditLog = require('./auditLog');
+  test('records and lists newest-first; filters by action', () => {
+    const a = new AuditLog();
+    a.record({ actor: 'token:abcd…', action: 'teach', method: 'POST', status: 200 });
+    a.record({ actor: 'token:abcd…', action: 'replay', method: 'POST', status: 200 });
+    const list = a.list({ limit: 10 });
+    assert.strictEqual(list[0].action, 'replay');
+    assert.strictEqual(a.list({ action: 'teach' }).length, 1);
+  });
+  test('ring buffer bounds memory', () => {
+    const a = new AuditLog({ max: 3 });
+    for (let i = 0; i < 10; i++) a.record({ action: 'x' + i });
+    assert.strictEqual(a.size(), 3);
+    assert.strictEqual(a.list({ limit: 10 })[0].action, 'x9');
+  });
+}
+
 section('rbac (scoped token authorization)');
 {
   const rbac = require('./rbac');
