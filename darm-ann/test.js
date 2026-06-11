@@ -1031,6 +1031,56 @@ section('auditLog (operator action trail)');
   });
 }
 
+// ───────────────────────── backup / restore ─────────────────────────
+section('backup (snapshot archive + restore)');
+{
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const backup = require('./backup');
+  const DarmAnn = require('./index');
+
+  function tmpNodeDir() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'darm-bk-'));
+    const node = new DarmAnn({ nodeId: 'bk', config: { cdcp: { tMinAgeMs: 0 } } });
+    const c = 'archived knowledge survives a PVC migration';
+    node.teach(c);
+    node.observe({ claim: c, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } });
+    node.consolidate(node.stm.all()[0].claim_id);
+    node.save(path.join(dir, 'node.json'));
+    fs.writeFileSync(path.join(dir, 'audit.log'), '{"action":"teach"}\n');
+    return { dir, ltm: node.ltm.size };
+  }
+
+  test('create → verify → restore round-trip preserves a valid LTM', () => {
+    const { dir, ltm } = tmpNodeDir();
+    assert.strictEqual(ltm, 1);
+    const archive = backup.createArchive(dir, backup.allFiles());
+    assert.deepStrictEqual(archive.files.sort(), ['audit.log', 'node.json']);
+    assert.ok(backup.verifyArchive(archive).ok, 'archive verifies');
+
+    const restoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'darm-rs-'));
+    const written = backup.restoreArchive(archive, restoreDir);
+    assert.ok(written.includes('node.json') && written.includes('audit.log'));
+    const restored = DarmAnn.load(path.join(restoreDir, 'node.json'), { config: { cdcp: { tMinAgeMs: 0 } } });
+    assert.strictEqual(restored.ltm.size, 1);
+    assert.ok(restored.ltm.validate().valid, 'restored chain valid');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(restoreDir, { recursive: true, force: true });
+  });
+
+  test('corruption is detected (checksum + digest)', () => {
+    const { dir } = tmpNodeDir();
+    const archive = backup.createArchive(dir, backup.allFiles());
+    // Tamper with a file's content but not its checksum → checksum mismatch.
+    archive.entries['node.json'].content = Buffer.from('garbage').toString('base64');
+    const r = backup.verifyArchive(archive);
+    assert.ok(!r.ok && /checksum|digest|invalid|load/.test(r.reason), r.reason);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+}
+
 section('rbac (scoped token authorization)');
 {
   const rbac = require('./rbac');

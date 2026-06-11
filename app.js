@@ -395,6 +395,24 @@ app.get("/darm/audit", (req, res)=>{
     res.json({ size: darmAudit.size(), entries: darmAudit.list({ limit: Number(req.query.limit) || 100, action: req.query.action || null }) });
 });
 
+// backup: snapshot the node's durable state to a portable, checksummed archive
+// (operator scope). Persists current state first so the backup is fresh.
+const darmBackup = require('./darm-ann/backup');
+app.post("/darm/backup", async (req, res)=>{
+    if (!DARM_SNAPSHOT) return res.status(400).json({ error: "DARM_SNAPSHOT not configured" });
+    const dataDir = require('path').dirname(DARM_SNAPSHOT);
+    const task = await darmTasks.run('backup', { label: 'backup data dir' }, async (ctl)=>{
+        persistSnapshot();                       // fresh snapshot first
+        if (process.env.DARM_AUDIT_FILE) { try { require('fs').appendFileSync(process.env.DARM_AUDIT_FILE, ''); } catch(_e){} }
+        const manifest = darmBackup.createArchive(dataDir, darmBackup.allFiles());
+        ctl.step(`archived ${manifest.files.length} file(s)`, 1);
+        return { files: manifest.files, digest: manifest.digest, archive: manifest };
+    });
+    const out = { note: "backup created", files: task.result.files, digest: task.result.digest, task: task.id };
+    if (req.query.download === '1') out.archive = task.result.archive; // inline archive
+    res.json(out);
+});
+
 // health: liveness/readiness probe for deployment
 app.get("/darm/health", (req, res)=>{
     const st = darm.state();

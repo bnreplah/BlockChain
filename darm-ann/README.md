@@ -261,7 +261,7 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET|POST /darm/alerts` (Alertmanager webhook) ·
 `GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·
 `GET /darm/monitor` (task monitor) · `GET /darm/audit` (operator action trail) ·
-`GET /darm/dashboard` (operator UI).
+`POST /darm/backup` (snapshot archive) · `GET /darm/dashboard` (operator UI).
 
 ### Observability (Prometheus + Grafana)
 
@@ -352,7 +352,25 @@ Optional, env-gated hardening (off by default for back-compat):
 
 See [`deploy/`](../deploy/README.md): Docker Compose, plain Kubernetes manifests
 (`deploy/k8s/darm-ann.yaml` — StatefulSet + Services + Secret + ServiceMonitor),
-and a Helm chart (`deploy/helm/darm-ann`).
+and a Helm chart (`deploy/helm/darm-ann`). CI runs an end-to-end **kind** smoke
+(builds the image, `helm install`, port-forwards, and exercises the authed API)
+and a tag-triggered **signed release** (push image to GHCR, generate a CycloneDX
+SBOM, and `cosign` sign + attest keylessly).
+
+### Backup / restore
+
+`darm-ann/backup.js` packages a node's durable `/data` state (LTM snapshot +
+audit log) into a single checksummed archive, so memory can be backed up or
+migrated between PVCs:
+
+```bash
+node darm-ann/backup.js create  /data backup.json   # archive (per-file SHA-256 + manifest digest)
+node darm-ann/backup.js verify  backup.json         # checksums + LTM chain-integrity load
+node darm-ann/backup.js restore backup.json /data   # write files back
+```
+
+`POST /darm/backup` (operator scope) snapshots fresh and returns the archive
+(add `?download=1` to inline it); the operation is tracked on the monitor.
 
 ### Auto-remediation
 
