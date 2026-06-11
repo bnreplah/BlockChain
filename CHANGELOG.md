@@ -5,6 +5,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — testing & docs hardening
+- **Chaos / soak harness** (`darm-ann/chaos.js`, `npm run darm:chaos`): runs the
+  multi-process BFT cluster through many heights while randomly killing and
+  restarting validators (WAL recovery), asserting liveness + safety (no fork) —
+  per-height and final whole-run agreement. Validated: dozens of heights through
+  multiple faults with safety/liveness intact.
+- **OpenAPI 3.1 spec** (`darm-ann/openapi.yaml`, 25 paths) served at
+  `GET /darm/openapi.yaml` with a Swagger UI at `GET /darm/docs`.
+- CI: chaos/soak smoke, OpenAPI validation, and an in-cluster docs/spec/version
+  check in the kind job.
+
 ### Added — production-readiness pass
 - `/darm/version` (build/version info) and `/darm/ready` (readiness probe);
   `darm_build_info` Prometheus metric; version surfaced in `/darm/health`.

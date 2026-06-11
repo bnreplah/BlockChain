@@ -26,7 +26,7 @@ const darmTokenScopes = rbac.buildTokenScopes({ authToken: process.env.DARM_AUTH
 if (process.env.DARM_CLUSTER_TOKEN) darmTokenScopes.set(process.env.DARM_CLUSTER_TOKEN, 'operator');
 // Open paths: probes, scrape, alerts webhook, and the static UI pages (the
 // pages themselves load data via authenticated XHR, so serving the HTML is safe).
-const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/ready', '/darm/version', '/darm/metrics', '/darm/alerts', '/darm/monitor', '/darm/dashboard']);
+const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/ready', '/darm/version', '/darm/metrics', '/darm/alerts', '/darm/monitor', '/darm/dashboard', '/darm/docs', '/darm/openapi.yaml']);
 // Per-token (or per-IP when anonymous) token-bucket rate limiter.
 const DARM_RL_CAP = Number(process.env.DARM_RATE_CAPACITY || 120);
 const DARM_RL_RPS = Number(process.env.DARM_RATE_PER_SEC || 60);
@@ -457,6 +457,22 @@ app.get("/darm/health", (req, res)=>{
 // version: build/version info (open — useful for deploy verification)
 const darmVersion = require('./darm-ann/version');
 app.get("/darm/version", (req, res)=>{ res.json(darmVersion.info()); });
+
+// openapi: serve the API specification (open)
+app.get("/darm/openapi.yaml", (req, res)=>{
+    res.set('Content-Type', 'application/yaml');
+    res.sendFile("./darm-ann/openapi.yaml", {root: __dirname});
+});
+// docs: Swagger UI rendering the spec (open)
+app.get("/darm/docs", (req, res)=>{
+    res.set('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>DARM-ANN API</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"></head>
+<body><div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>window.onload=()=>{SwaggerUIBundle({url:'/darm/openapi.yaml',dom_id:'#swagger-ui'});};</script>
+</body></html>`);
+});
 
 // ready: readiness probe — node has booted and its chains are valid
 app.get("/darm/ready", (req, res)=>{

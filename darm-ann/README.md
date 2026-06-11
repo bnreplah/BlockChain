@@ -36,11 +36,29 @@ real TCP consensus, Byzantine tolerance, and signature-forgery rejection:
 ```bash
 node darm-ann/test.js              # npm run darm:test        (87 unit/integration)
 node darm-ann/integration.test.js  # npm run darm:integration (10 HTTP API tests)
+node darm-ann/chaos.js 7 21000 30000  # npm run darm:chaos    (BFT soak: kill+restart)
 node darm-ann/demo.js              # npm run darm:demo
 node darm-ann/cluster.js 5         # npm run darm:cluster     (multi-process TCP BFT)
 ```
 
-New here? Start with the [Getting Started tutorial](TUTORIAL.md).
+New here? Start with the [Getting Started tutorial](TUTORIAL.md). The full HTTP
+API is documented as **OpenAPI 3.1** (`darm-ann/openapi.yaml`), served with a
+Swagger UI at `GET /darm/docs` on a running node.
+
+### Chaos / soak testing
+
+`darm-ann/chaos.js` runs the multi-process BFT cluster through many consensus
+heights while **randomly killing and restarting validators** (each recovers from
+its WAL), asserting both BFT guarantees hold throughout:
+
+- **Liveness** — every height still commits at ≥2/3 quorum despite the churn.
+- **Safety** — no two validators ever commit a different value at the same
+  height (no fork), verified per-height and in a final whole-run agreement check.
+
+```bash
+node darm-ann/chaos.js 7 21000 12000
+# → liveness=true safety=true finalAgreement=true → SUCCESS  (dozens of heights, several faults)
+```
 
 ---
 
@@ -266,7 +284,8 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·
 `GET /darm/monitor` (task monitor) · `GET /darm/audit` (operator action trail) ·
 `POST /darm/backup` (snapshot archive) · `POST /darm/restore` (hot-restore) ·
-`GET /darm/dashboard` (operator UI).
+`GET /darm/dashboard` (operator UI) · `GET /darm/docs` (Swagger UI) ·
+`GET /darm/openapi.yaml` (OpenAPI 3.1 spec).
 
 ### Observability (Prometheus + Grafana)
 

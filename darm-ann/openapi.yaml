@@ -1,0 +1,256 @@
+openapi: 3.1.0
+info:
+  title: DARM-ANN API
+  description: >
+    HTTP API for a DARM-ANN node (Distributed Agentic Recursive Memory Network).
+    The blockchain is the long-term memory tier; claims reach it only after
+    consensus-driven consolidation. Security is optional and env-gated: when
+    enabled, read endpoints require a `read`-scope bearer token and mutations
+    require an `operator`-scope token. `/darm/health`, `/darm/ready`,
+    `/darm/version`, `/darm/metrics`, `/darm/alerts`, `/darm/monitor`, and
+    `/darm/dashboard` are always open.
+  version: "6.0"
+  license:
+    name: CC BY 4.0
+servers:
+  - url: http://localhost:3001
+    description: Local node
+tags:
+  - name: lifecycle
+  - name: query
+  - name: consensus
+  - name: ops
+  - name: observability
+  - name: security
+  - name: cluster
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Scoped token: read (GET) or operator (mutations)."
+  schemas:
+    Claim:
+      type: object
+      required: [claim]
+      properties:
+        claim: { type: string, description: Natural-language assertion }
+    Observation:
+      type: object
+      required: [claim]
+      properties:
+        claim: { type: string }
+        reward: { type: number, default: 1 }
+        epistemic:
+          type: object
+          properties:
+            conf_cal: { type: number, minimum: 0, maximum: 1 }
+            u_ep: { type: number, minimum: 0, maximum: 1 }
+    QueryResult:
+      type: object
+      properties:
+        tier: { type: string, enum: [RRC, STM, LTM, MISS] }
+        hit: { type: boolean }
+        result: { type: string }
+        confidence: { type: number }
+        similarity: { type: number }
+        source: { type: string }
+    State:
+      type: object
+      properties:
+        nodeId: { type: string }
+        ltmMode: { type: string }
+        tiers:
+          type: object
+          properties:
+            EB: { type: integer }
+            STM: { type: integer }
+            LTM: { type: integer }
+            RRC: { type: integer }
+        chains:
+          type: object
+          properties:
+            stmHeight: { type: integer }
+            stmValid: { type: boolean }
+            ltmValid: { type: boolean }
+        cluster:
+          type: object
+          properties:
+            voters: { type: integer }
+            tauC: { type: number }
+            membershipVersion: { type: integer }
+    Tx:
+      type: object
+      required: [type, payload]
+      properties:
+        type: { type: string, example: memory }
+        payload: { type: object }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+security:
+  - bearerAuth: []
+paths:
+  /darm/health:
+    get:
+      tags: [observability]
+      summary: Liveness — chains valid
+      security: []
+      responses:
+        "200": { description: Healthy }
+        "503": { description: Degraded }
+  /darm/ready:
+    get:
+      tags: [observability]
+      summary: Readiness probe
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+  /darm/version:
+    get:
+      tags: [observability]
+      summary: Build/version info
+      security: []
+      responses:
+        "200": { description: Version info }
+  /darm/metrics:
+    get:
+      tags: [observability]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200": { description: Exposition format, content: { text/plain: {} } }
+  /darm/state:
+    get:
+      tags: [observability]
+      summary: Σ(t) snapshot of tiers, chains, cluster
+      responses:
+        "200": { description: State, content: { application/json: { schema: { $ref: "#/components/schemas/State" } } } }
+        "401": { description: Unauthorized }
+  /darm/teach:
+    post:
+      tags: [lifecycle]
+      summary: Ground a fact across cluster validators (operator)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Claim" } } } }
+      responses: { "200": { description: Grounded }, "403": { description: Forbidden } }
+  /darm/refute:
+    post:
+      tags: [lifecycle]
+      summary: Mark a claim refuted across validators (operator)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Claim" } } } }
+      responses: { "200": { description: Refuted } }
+  /darm/observe:
+    post:
+      tags: [lifecycle]
+      summary: Ingest an observation into the pipeline (operator)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Observation" } } } }
+      responses: { "200": { description: Ingested } }
+  /darm/query:
+    get:
+      tags: [query]
+      summary: Retrieve via the memory hierarchy (RRC→STM→LTM→MISS)
+      parameters: [{ name: q, in: query, required: true, schema: { type: string } }]
+      responses: { "200": { description: Result, content: { application/json: { schema: { $ref: "#/components/schemas/QueryResult" } } } } }
+  /darm/navigate:
+    get:
+      tags: [query]
+      summary: Model-directed walk over the Markov chain-graph
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: steps, in: query, schema: { type: integer, default: 8 } }
+      responses: { "200": { description: Path } }
+  /darm/replay:
+    post:
+      tags: [consensus]
+      summary: Run an RCE consolidation cycle (operator)
+      responses: { "200": { description: Cycle report } }
+  /darm/triage:
+    post:
+      tags: [consensus]
+      summary: Run STM lifecycle triage (operator)
+      responses: { "200": { description: Triage report } }
+  /darm/selfcorrect:
+    post:
+      tags: [ops]
+      summary: Validate/repair chains, prune, supersede contradictions (operator)
+      responses: { "200": { description: Self-correction report } }
+  /darm/tx:
+    post:
+      tags: [consensus]
+      summary: Submit a gossip transaction (operator) or receive a relay
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/Tx" } } } }
+      responses: { "200": { description: Submitted/relayed } }
+  /darm/mempool:
+    get:
+      tags: [consensus]
+      summary: Inspect pending transactions
+      responses: { "200": { description: Mempool } }
+  /darm/validators:
+    get:
+      tags: [cluster]
+      summary: List the active validator set
+      responses: { "200": { description: Validators } }
+    post:
+      tags: [cluster]
+      summary: Add a validator (operator)
+      responses: { "200": { description: Added } }
+  /darm/validators/{id}:
+    delete:
+      tags: [cluster]
+      summary: Remove a validator (operator)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: Removed } }
+  /darm/snapshot:
+    post:
+      tags: [ops]
+      summary: Persist a durable snapshot (operator)
+      responses: { "200": { description: Saved } }
+  /darm/backup:
+    post:
+      tags: [ops]
+      summary: Create a portable checksummed archive (operator)
+      parameters: [{ name: download, in: query, schema: { type: string, enum: ["1"] } }]
+      responses: { "200": { description: Archive } }
+  /darm/restore:
+    post:
+      tags: [ops]
+      summary: Hot-restore the node from a backup archive (operator)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { archive: { type: object }, path: { type: string } } } } } }
+      responses: { "200": { description: Restored }, "400": { description: Invalid archive } }
+  /darm/tasks:
+    get:
+      tags: [observability]
+      summary: List tracked operations + summary
+      responses: { "200": { description: Tasks } }
+  /darm/tasks/stream:
+    get:
+      tags: [observability]
+      summary: Server-Sent Events stream of task updates
+      responses: { "200": { description: SSE, content: { text/event-stream: {} } } }
+  /darm/tasks/{id}:
+    get:
+      tags: [observability]
+      summary: Get a task by id
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: Task }, "404": { description: Not found } }
+  /darm/audit:
+    get:
+      tags: [security]
+      summary: Operator action trail
+      parameters:
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: action, in: query, schema: { type: string } }
+      responses: { "200": { description: Audit entries } }
+  /darm/alerts:
+    get:
+      tags: [observability]
+      summary: Recent alerts
+      security: []
+      responses: { "200": { description: Alerts } }
+    post:
+      tags: [observability]
+      summary: Alertmanager webhook receiver
+      security: []
+      responses: { "200": { description: Received } }
