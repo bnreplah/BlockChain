@@ -15,6 +15,8 @@ Memory Network*) memory hierarchy.
   consolidation (CDCP), a replay engine (RCE), poly-chain morphism, and
   cross-chain pollination. **See [`darm-ann/README.md`](darm-ann/README.md).**
 
+**New here? Start with the hands-on [Getting Started tutorial](darm-ann/TUTORIAL.md).**
+
 ## DARM-ANN at a glance
 
 The blockchain *is* the long-term memory. DARM-ANN layers fast/ephemeral and

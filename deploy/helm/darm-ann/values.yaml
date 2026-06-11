@@ -39,4 +39,22 @@ serviceMonitor:
   interval: 15s
   labels: {}
 
+# Horizontal Pod Autoscaler (requires metrics-server). Note: scaling a
+# StatefulSet changes the validator set — new pods join via state-sync and an
+# add-validator consensus txn; consider keeping max modest for BFT stability.
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 7
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
+
+# PodDisruptionBudget keeps a BFT quorum available during voluntary disruptions
+# (node drains, rolling updates). For a 3-replica set, minAvailable: 2 preserves
+# >2/3 so consensus can still commit.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
 terminationGracePeriodSeconds: 20

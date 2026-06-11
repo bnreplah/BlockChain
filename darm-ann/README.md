@@ -261,7 +261,8 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET|POST /darm/alerts` (Alertmanager webhook) ·
 `GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·
 `GET /darm/monitor` (task monitor) · `GET /darm/audit` (operator action trail) ·
-`POST /darm/backup` (snapshot archive) · `GET /darm/dashboard` (operator UI).
+`POST /darm/backup` (snapshot archive) · `POST /darm/restore` (hot-restore) ·
+`GET /darm/dashboard` (operator UI).
 
 ### Observability (Prometheus + Grafana)
 

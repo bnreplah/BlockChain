@@ -184,6 +184,25 @@ jobs:
           curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/replay >/dev/null
           TIER=$(curl -sf -H "$AUTH" "http://localhost:3001/darm/query?q=$(echo $C | sed 's/ /%20/g')" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tier))")
           echo "query tier: $TIER"; test "$TIER" = "RRC" -o "$TIER" = "LTM"
+      - name: Snapshot then verify PVC persistence across a pod restart
+        run: |
+          set -e
+          AUTH="Authorization: Bearer op"
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf.log 2>&1 &
+          PF=$!; sleep 5
+          # force a durable snapshot to the PVC, note the LTM size
+          curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/snapshot >/dev/null
+          BEFORE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tiers.LTM))")
+          echo "LTM before restart: $BEFORE"; test "$BEFORE" -ge 1
+          kill $PF || true
+          # delete the pod; the StatefulSet recreates it on the SAME PVC
+          kubectl -n darm-ann delete pod darm-ann-0 --wait=true
+          kubectl -n darm-ann rollout status statefulset/darm-ann --timeout=180s
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf2.log 2>&1 &
+          PF2=$!; sleep 6
+          AFTER=$(curl -sf -H "$AUTH" http://localhost:3001/darm/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tiers.LTM))")
+          echo "LTM after restart (restored from PVC): $AFTER"; test "$AFTER" = "$BEFORE"
+          kill $PF2 || true
       - name: Dump diagnostics on failure
         if: failure()
         run: kubectl -n darm-ann get all && kubectl -n darm-ann logs statefulset/darm-ann --tail=100 || true

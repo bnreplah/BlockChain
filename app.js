@@ -413,6 +413,38 @@ app.post("/darm/backup", async (req, res)=>{
     res.json(out);
 });
 
+// restore: rebuild the running node from a backup archive (operator scope).
+// Body: { archive: <manifest> }  OR  { path: "/data/backup.json" }.
+// Verifies the archive (incl. LTM chain integrity), writes files to the data
+// dir, then hot-swaps the live node from the restored snapshot.
+app.post("/darm/restore", async (req, res)=>{
+    if (!DARM_SNAPSHOT) return res.status(400).json({ error: "DARM_SNAPSHOT not configured" });
+    const dataDir = require('path').dirname(DARM_SNAPSHOT);
+    let manifest = req.body && req.body.archive;
+    try {
+        if (!manifest && req.body && req.body.path) manifest = JSON.parse(require('fs').readFileSync(req.body.path, 'utf8'));
+    } catch (e) { return res.status(400).json({ error: "cannot read archive: " + e.message }); }
+    if (!manifest) return res.status(400).json({ error: "provide body.archive or body.path" });
+    const check = darmBackup.verifyArchive(manifest);
+    if (!check.ok) return res.status(400).json({ error: "archive invalid", reason: check.reason });
+    try {
+        const task = await darmTasks.run('restore', { label: 'restore from backup' }, async (ctl)=>{
+            const written = darmBackup.restoreArchive(manifest, dataDir);
+            ctl.step(`restored ${written.length} file(s); hot-swapping node`);
+            const old = darm;
+            darm = DarmAnn.load(DARM_SNAPSHOT, { adapter: repoChainAdapter(Bcoin), config: darmConfig });
+            darm._taskHook = old._taskHook;
+            darm.autorun();
+            old.stop();
+            ctl.step(`node restored: LTM=${darm.ltm.size}, valid=${darm.ltm.validate().valid}`, 1);
+            return { files: written, ltm: darm.ltm.size, ltmValid: darm.ltm.validate().valid };
+        });
+        res.json({ note: "restored", ...task.result, task: task.id });
+    } catch (e) {
+        res.status(500).json({ error: "restore failed: " + e.message });
+    }
+});
+
 // health: liveness/readiness probe for deployment
 app.get("/darm/health", (req, res)=>{
     const st = darm.state();

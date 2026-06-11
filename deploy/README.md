@@ -34,8 +34,17 @@ helm install darm deploy/helm/darm-ann \
 ```
 
 Key `values.yaml` knobs: `replicaCount`, `image.*`, `tokens.*`, `persistence.*`,
-`resources`, `serviceMonitor.enabled`, and `config.*` (snapshot interval, TTL
-min-age, audit file, rate limits, auto-remediation).
+`resources`, `serviceMonitor.enabled`, `autoscaling.*` (HPA, off by default),
+`podDisruptionBudget.*` (on by default, `minAvailable: 2` keeps a quorum during
+drains), and `config.*` (snapshot interval, TTL min-age, audit file, rate
+limits, auto-remediation).
+
+**Backup / restore:** each pod snapshots to its PVC and restores on restart, so
+deleting a pod recovers its memory automatically (CI's kind smoke proves this).
+For off-cluster backups, `POST /darm/backup?download=1` returns a portable
+checksummed archive and `POST /darm/restore` hot-restores from one — see the
+[backup tooling](../darm-ann/backup.js) and the
+[tutorial](../darm-ann/TUTORIAL.md#5-back-up-and-restore).
 
 ### Notes
 
