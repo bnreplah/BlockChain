@@ -34,10 +34,13 @@ Run the suite — **50 unit + integration tests, every module covered**, incl.
 real TCP consensus, Byzantine tolerance, and signature-forgery rejection:
 
 ```bash
-node darm-ann/test.js      # npm run darm:test   (52 tests)
-node darm-ann/demo.js      # npm run darm:demo
-node darm-ann/cluster.js 5 # npm run darm:cluster (multi-process TCP consensus)
+node darm-ann/test.js              # npm run darm:test        (87 unit/integration)
+node darm-ann/integration.test.js  # npm run darm:integration (10 HTTP API tests)
+node darm-ann/demo.js              # npm run darm:demo
+node darm-ann/cluster.js 5         # npm run darm:cluster     (multi-process TCP BFT)
 ```
+
+New here? Start with the [Getting Started tutorial](TUTORIAL.md).
 
 ---
 
@@ -256,7 +259,8 @@ partitioned minority, and **safety** under a full network split (no side with a
 `POST /darm/refute` · `POST /darm/replay` · `POST /darm/triage` ·
 `POST /darm/selfcorrect` · `POST /darm/snapshot` · `POST /darm/tx` ·
 `GET /darm/mempool` · `GET /darm/navigate?q=` · `GET /darm/state` ·
-`GET /darm/health` · `GET|POST /darm/validators` ·
+`GET /darm/health` · `GET /darm/ready` · `GET /darm/version` ·
+`GET|POST /darm/validators` ·
 `DELETE /darm/validators/:id` · `GET /darm/metrics` (Prometheus) ·
 `GET|POST /darm/alerts` (Alertmanager webhook) ·
 `GET /darm/tasks` · `GET /darm/tasks/stream` (SSE) · `GET /darm/tasks/:id` ·

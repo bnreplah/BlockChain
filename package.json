@@ -11,6 +11,7 @@
     "node_3": "nodemon --watch Hotsets -e js ./app.js 3003 http://localhost:3003",
     "node_4": "nodemon --watch Hotsets -e js ./app.js 3004 http://localhost:3004",
     "darm:test": "node ./darm-ann/test.js",
+    "darm:integration": "node ./darm-ann/integration.test.js",
     "darm:demo": "node ./darm-ann/demo.js",
     "darm:cluster": "node ./darm-ann/cluster.js 5",
     "darm:rsm": "node ./darm-ann/clusterRSM.js 4",

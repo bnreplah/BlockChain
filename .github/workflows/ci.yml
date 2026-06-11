@@ -15,8 +15,10 @@ jobs:
         with:
           node-version: "20"
       # The DARM-ANN module is dependency-free, so the suite runs without install.
-      - name: Run test suite (unit + integration)
+      - name: Run unit test suite
         run: node darm-ann/test.js
+      - name: Run HTTP integration tests (real server)
+        run: node darm-ann/integration.test.js
       - name: Narrated demo (smoke)
         run: node darm-ann/demo.js
       - name: Multi-process TCP consensus (smoke)

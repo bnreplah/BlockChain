@@ -41,6 +41,12 @@ function render(darm, extra = {}) {
       out += `darm_tasks{status="${status}"} ${extra.tasks[status] || 0}\n`;
     }
   }
+  if (extra.buildInfo) {
+    const b = extra.buildInfo;
+    const esc = (s) => String(s).replace(/["\\]/g, '\\$&');
+    out += `# HELP darm_build_info Build/version info (constant 1; value in labels)\n# TYPE darm_build_info gauge\n`;
+    out += `darm_build_info{version="${esc(b.version)}",commit="${esc(b.commit)}",paper="${esc(b.paperVersion)}",node="${esc(b.node)}"} 1\n`;
+  }
   return out;
 }
 

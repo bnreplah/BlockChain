@@ -18,8 +18,16 @@ ENV PORT=3001 \
     DARM_SNAPSHOT_MS=60000 \
     DARM_MIN_AGE_MS=60000
 
-# Persistent state volume (shared LTM snapshot + WAL survive restarts).
-RUN mkdir -p /data
+# Build-info (injected at build time for reproducible version reporting).
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
+ENV DARM_GIT_COMMIT=${GIT_COMMIT} \
+    DARM_BUILD_TIME=${BUILD_TIME}
+
+# Persistent state volume (shared LTM snapshot + WAL survive restarts). The
+# slim image ships a non-root "node" user (uid 1000); run as it and own /data.
+RUN mkdir -p /data && chown -R node:node /data /app
+USER node
 EXPOSE 3001
 VOLUME ["/data"]
 

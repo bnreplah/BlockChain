@@ -33,6 +33,26 @@ resources:
   requests: { cpu: "100m", memory: "128Mi" }
   limits: { cpu: "1", memory: "512Mi" }
 
+# Pod / container security hardening (run as non-root, drop caps, read-only
+# root FS; the app only writes /data (PVC) and /tmp (emptyDir)).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Restrict ingress to peer pods (+ optional namespaces) on the API port.
+networkPolicy:
+  enabled: false
+  allowFromNamespaces: []   # e.g. ["monitoring", "ingress-nginx"]
+
 # Create a Prometheus Operator ServiceMonitor (requires the operator CRDs).
 serviceMonitor:
   enabled: true

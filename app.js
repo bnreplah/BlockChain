@@ -24,7 +24,9 @@ const AuditLog = require('./darm-ann/auditLog');
 const darmTokenScopes = rbac.buildTokenScopes({ authToken: process.env.DARM_AUTH_TOKEN || '', tokensSpec: process.env.DARM_TOKENS || '' });
 // Inter-node cluster token is accepted as operator scope (gossip/state-sync).
 if (process.env.DARM_CLUSTER_TOKEN) darmTokenScopes.set(process.env.DARM_CLUSTER_TOKEN, 'operator');
-const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/metrics', '/darm/alerts']);
+// Open paths: probes, scrape, alerts webhook, and the static UI pages (the
+// pages themselves load data via authenticated XHR, so serving the HTML is safe).
+const DARM_OPEN_PATHS = new Set(['/darm/health', '/darm/ready', '/darm/version', '/darm/metrics', '/darm/alerts', '/darm/monitor', '/darm/dashboard']);
 // Per-token (or per-IP when anonymous) token-bucket rate limiter.
 const DARM_RL_CAP = Number(process.env.DARM_RATE_CAPACITY || 120);
 const DARM_RL_RPS = Number(process.env.DARM_RATE_PER_SEC || 60);
@@ -449,7 +451,18 @@ app.post("/darm/restore", async (req, res)=>{
 app.get("/darm/health", (req, res)=>{
     const st = darm.state();
     const healthy = st.chains.stmValid && st.chains.ltmValid;
-    res.status(healthy ? 200 : 503).json({status: healthy ? "ok" : "degraded", chains: st.chains, tiers: st.tiers});
+    res.status(healthy ? 200 : 503).json({status: healthy ? "ok" : "degraded", chains: st.chains, tiers: st.tiers, version: darmVersion.info().version});
+});
+
+// version: build/version info (open — useful for deploy verification)
+const darmVersion = require('./darm-ann/version');
+app.get("/darm/version", (req, res)=>{ res.json(darmVersion.info()); });
+
+// ready: readiness probe — node has booted and its chains are valid
+app.get("/darm/ready", (req, res)=>{
+    const st = darm.state();
+    const ready = !!darm && st.chains.stmValid && st.chains.ltmValid;
+    res.status(ready ? 200 : 503).json({ready});
 });
 
 // tx: submit a new transaction (origin) OR receive a gossiped one (peers).
@@ -519,6 +532,7 @@ app.get("/darm/metrics", (req, res)=>{
         uptimeSeconds: (Date.now() - darmStartTime) / 1000,
         networkNodes: (Bcoin.networkNode || []).length,
         tasks: darmTasks.summary(),
+        buildInfo: darmVersion.info(),
     });
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(text);
