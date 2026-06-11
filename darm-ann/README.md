@@ -56,9 +56,16 @@ its WAL), asserting both BFT guarantees hold throughout:
   height (no fork), verified per-height and in a final whole-run agreement check.
 
 ```bash
-node darm-ann/chaos.js 7 21000 12000
+node darm-ann/chaos.js 7 21000 12000     # kill+restart soak
 # → liveness=true safety=true finalAgreement=true → SUCCESS  (dozens of heights, several faults)
+
+node darm-ann/chaos.js 6 21500 --partition   # network partition
+# → no progress during a quorum-less split, then clean recovery with agreement → SUCCESS
 ```
+
+A **performance-regression gate** is built into the benchmark: pass
+`--min-tps=N` (or `BENCH_MIN_TPS`) and the best-of-iterations throughput must
+meet the SLO or the run exits non-zero (used in CI).
 
 ---
 

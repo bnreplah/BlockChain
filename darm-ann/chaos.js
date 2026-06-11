@@ -61,17 +61,23 @@ async function runChild(i, n, basePort, master) {
     if (e.t === 'COMMIT' && e.node === me) { committed[e.height] = e.value.claim; height = e.height + 1; }
   }
 
-  transport.connect(me, (msg) => { if (BFT_TYPES.has(msg.type) && bft) bft.handle(msg); });
+  const blocked = new Set(); // peers this node is partitioned from (drops their msgs)
+  transport.connect(me, (msg) => {
+    const src = msg && (msg.from || msg.proposer);
+    if (src && blocked.has(src)) return; // partitioned link — drop the message
+    if (BFT_TYPES.has(msg.type) && bft) bft.handle(msg);
+  });
 
   process.on('message', (m) => {
     if (m.cmd === 'done') return process.exit(0);
+    if (m.cmd === 'partition') { blocked.clear(); for (const p of m.peers || []) blocked.add(p); process.send({ partitioned: true, blocked: [...blocked] }); return; }
     if (m.cmd === 'state') { process.send({ state: true, height, log: committed.slice(0, height) }); return; }
     if (m.cmd === 'height') {
       // Already committed this height (e.g. recovered from WAL): re-report value.
       if (m.height < height) { process.send({ committed: true, height: m.height, value: committed[m.height], already: true }); return; }
       bft = new BFTNode({
         nodeId: me, key: keys[i], validators: set, transport, tauC: 0.67,
-        useTimers: true, timeoutMs: 200, height: m.height, wal,
+        useTimers: true, timeoutMs: 200, height: m.height, wal, autoConnect: false,
         evaluate: () => ({ vote: 'YES', score: 0.9 }),
         onDecide: () => {
           committed[m.height] = m.value.claim;
@@ -86,7 +92,7 @@ async function runChild(i, n, basePort, master) {
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────
-function launch(n, basePort, durationMs) {
+function launch(n, basePort, durationMs, mode) {
   const master = crypto.randomBytes(8).toString('hex');
   const f = Math.floor((n - 1) / 3);
   const quorum = Math.ceil((2 * n) / 3);
@@ -227,7 +233,69 @@ function launch(n, basePort, durationMs) {
     return out;
   }
 
-  main().catch((e) => { console.error('[chaos] error', e); process.exit(2); });
+  // ── Network-partition scenario ──────────────────────────────────────────
+  // Drive normal heights, then split the cluster into two groups where NEITHER
+  // has a quorum and assert NO height commits (safety: a partitioned minority
+  // cannot make progress). Then heal and assert progress resumes — at the same
+  // value, with no fork.
+  async function partitionMain() {
+    console.log(`[chaos] PARTITION mode: n=${n} f=${f} quorum=${quorum}`);
+    for (let i = 0; i < n; i++) spawn(i);
+    while (ready.size < n) await sleep(50);
+    await sleep(400);
+
+    let safetyOk = true;
+    // Phase 1: a few clean heights.
+    let h = 0;
+    for (; h < 3; h++) {
+      const value = { type: 'memory', claim: `pre-${h}` };
+      for (let i = 0; i < n; i++) send(i, { cmd: 'height', height: h, value });
+      if (!(await awaitCommit(h, quorum))) { console.log(`[chaos] pre-partition height ${h} failed`); return done(false); }
+    }
+    console.log(`[chaos] ${h} heights committed cleanly`);
+
+    // Phase 2: partition into A=[0..a) and B=[a..n); neither reaches 2/3.
+    const a = Math.floor(n / 2);
+    const A = Array.from({ length: a }, (_, i) => `v${i}`);
+    const B = Array.from({ length: n - a }, (_, i) => `v${a + i}`);
+    for (let i = 0; i < n; i++) send(i, { cmd: 'partition', peers: i < a ? B : A });
+    console.log(`[chaos] partitioned: A={${A.join(',')}} | B={${B.join(',')}} (|A|=${a}, |B|=${n - a}, quorum=${quorum})`);
+    await sleep(300);
+
+    // Attempt a height during the partition — it MUST NOT commit anywhere.
+    const splitHeight = h;
+    for (let i = 0; i < n; i++) send(i, { cmd: 'height', height: splitHeight, value: { type: 'memory', claim: `split-${i < a ? 'A' : 'B'}` } });
+    const committedDuringSplit = await awaitCommit(splitHeight, 1, 3000); // even ONE commit would be a violation
+    if (committedDuringSplit) { safetyOk = false; console.log(`[chaos] SAFETY VIOLATION: a side committed during a quorum-less partition`); }
+    else console.log(`[chaos] no progress during partition (correct — neither side has quorum)`);
+
+    // Phase 3: heal the partition; the SAME height must now commit, identically.
+    for (let i = 0; i < n; i++) send(i, { cmd: 'partition', peers: [] });
+    console.log('[chaos] partition healed');
+    await sleep(300);
+    for (let i = 0; i < n; i++) send(i, { cmd: 'height', height: splitHeight, value: { type: 'memory', claim: 'healed' } });
+    const recovered = await awaitCommit(splitHeight, quorum, 6000);
+    const vals = commitsAtHeight[splitHeight] ? [...commitsAtHeight[splitHeight].values()] : [];
+    const agree = vals.length > 0 && vals.every((v) => v === vals[0]);
+    console.log(`[chaos] post-heal commit: ${recovered}, agreement: ${agree}`);
+
+    const pass = safetyOk && recovered && agree;
+    console.log(`[chaos] liveness(after heal)=${recovered} safety(during split)=${safetyOk} agreement=${agree}`);
+    console.log(`[chaos] result: ${pass ? 'SUCCESS' : 'FAILURE'}`);
+    return done(pass);
+  }
+
+  function done(pass) {
+    for (const c of children) if (c) { try { c.send({ cmd: 'done' }); } catch (_e) {} }
+    setTimeout(() => {
+      for (const c of children) if (c) c.kill('SIGKILL');
+      for (let i = 0; i < n; i++) { try { fs.unlinkSync(path.join(os.tmpdir(), `darm-chaos-${master}-v${i}.log`)); } catch (_e) {} }
+      process.exit(pass ? 0 : 1);
+    }, 300);
+  }
+
+  const runner = mode === 'partition' ? partitionMain : main;
+  runner().catch((e) => { console.error('[chaos] error', e); process.exit(2); });
 }
 
 if (require.main === module) {
@@ -235,6 +303,9 @@ if (require.main === module) {
   if (argv[0] === 'child') {
     runChild(Number(argv[1]), Number(argv[2]), Number(argv[3]), argv[4]).catch((e) => { console.error(e); process.exit(3); });
   } else {
-    launch(Number(argv[0] || 7), Number(argv[1] || 21000), Number(argv[2] || 12000));
+    // node chaos.js [n] [basePort] [durationMs] [--partition]
+    const mode = argv.includes('--partition') ? 'partition' : 'kill';
+    const pos = argv.filter((a) => !a.startsWith('--'));
+    launch(Number(pos[0] || 7), Number(pos[1] || 21000), Number(pos[2] || 12000), mode);
   }
 }

@@ -29,10 +29,12 @@ jobs:
         run: DARM_CLUSTER_MTLS=1 timeout 50 node darm-ann/cluster.js 4 20500
       - name: Chaos/soak — BFT under random validator kill+restart
         run: timeout 60 node darm-ann/chaos.js 7 21000 12000
+      - name: Chaos — network partition (no progress, then recovery)
+        run: timeout 50 node darm-ann/chaos.js 6 21500 --partition
       - name: Validate OpenAPI spec parses
         run: python3 -c "import yaml; d=yaml.safe_load(open('darm-ann/openapi.yaml')); assert d['openapi'].startswith('3'); print(len(d['paths']),'paths')"
-      - name: Throughput benchmark (correctness under load)
-        run: node darm-ann/bench.js 100 4 10
+      - name: Throughput benchmark + performance-regression gate
+        run: node darm-ann/bench.js 200 4 10 --min-tps=${{ vars.BENCH_MIN_TPS || 250 }}
       - name: Validate Prometheus alert rules
         run: docker run --rm -v "$PWD/monitoring:/m" --entrypoint promtool prom/prometheus:latest check rules /m/alerts.yml
       - name: Validate Kubernetes manifests parse
@@ -235,18 +237,28 @@ jobs:
       id-token: write          # keyless cosign via OIDC
     steps:
       - uses: actions/checkout@v4
+      - name: Set up QEMU (for cross-arch builds)
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push image
+      - name: Build and push multi-arch image (amd64 + arm64)
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
           tags: ghcr.io/${{ github.repository }}/darm-ann:${{ github.ref_name }}
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@v0

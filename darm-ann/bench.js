@@ -121,12 +121,31 @@ function toPrometheus(r) {
 }
 
 if (require.main === module) {
-  const [txns, validators, batch] = process.argv.slice(2).map(Number);
-  const r = runBenchmark({ txns: txns || 200, validators: validators || 4, batch: batch || 10 });
-  console.log(JSON.stringify(r, null, 2));
-  if (process.env.BENCH_PROM) console.log('\n' + toPrometheus(r));
-  // Non-zero exit if correctness broke under load.
-  process.exit(r.ltmAgreement && r.committedTxns === r.txns ? 0 : 1);
+  const args = process.argv.slice(2);
+  const pos = args.filter((a) => !a.startsWith('--')).map(Number);
+  const [txns, validators, batch] = pos;
+  // Performance-regression gate: BENCH_MIN_TPS (or --min-tps N) fails the run if
+  // the BEST-of-iterations throughput falls below the SLO. Best-of reduces CI
+  // noise from a single slow sample while still catching real regressions.
+  const minTpsArg = args.find((a) => a.startsWith('--min-tps='));
+  const minTps = Number((minTpsArg && minTpsArg.split('=')[1]) || process.env.BENCH_MIN_TPS || 0);
+  const iters = Number(process.env.BENCH_ITERS || (minTps ? 3 : 1));
+
+  let best = null;
+  for (let i = 0; i < iters; i++) {
+    const r = runBenchmark({ txns: txns || 200, validators: validators || 4, batch: batch || 10 });
+    if (!best || r.throughputTps > best.throughputTps) best = r;
+  }
+  console.log(JSON.stringify(best, null, 2));
+  if (process.env.BENCH_PROM) console.log('\n' + toPrometheus(best));
+
+  const correctnessOk = best.ltmAgreement && best.committedTxns === best.txns;
+  let slaOk = true;
+  if (minTps > 0) {
+    slaOk = best.throughputTps >= minTps;
+    console.log(`\n[bench] SLO: best ${best.throughputTps} tps vs min ${minTps} tps (over ${iters} iters) → ${slaOk ? 'PASS' : 'FAIL'}`);
+  }
+  process.exit(correctnessOk && slaOk ? 0 : 1);
 }
 
 module.exports = { runBenchmark, toPrometheus };

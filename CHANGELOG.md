@@ -9,12 +9,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **Chaos / soak harness** (`darm-ann/chaos.js`, `npm run darm:chaos`): runs the
   multi-process BFT cluster through many heights while randomly killing and
   restarting validators (WAL recovery), asserting liveness + safety (no fork) —
-  per-height and final whole-run agreement. Validated: dozens of heights through
-  multiple faults with safety/liveness intact.
+  per-height and final whole-run agreement.
+- **Network-partition chaos** (`--partition`, `npm run darm:chaos:partition`):
+  splits the cluster so neither side has a quorum, asserts NO progress during
+  the split (safety), then heals and asserts progress resumes with agreement.
+  This surfaced and fixed a real harness bug (the BFT node was overwriting the
+  partition-aware transport dispatcher via autoConnect).
+- **Performance-regression gate** in the benchmark (`--min-tps=N` /
+  `BENCH_MIN_TPS`): best-of-iterations throughput must meet the SLO or the run
+  fails. Wired into CI.
 - **OpenAPI 3.1 spec** (`darm-ann/openapi.yaml`, 25 paths) served at
   `GET /darm/openapi.yaml` with a Swagger UI at `GET /darm/docs`.
-- CI: chaos/soak smoke, OpenAPI validation, and an in-cluster docs/spec/version
-  check in the kind job.
+- CI: chaos/soak + partition smokes, performance-regression gate, OpenAPI
+  validation, an in-cluster docs/spec/version check in the kind job, and
+  multi-arch (amd64 + arm64) image builds with provenance + SBOM in the release.
 
 ### Added — production-readiness pass
 - `/darm/version` (build/version info) and `/darm/ready` (readiness probe);

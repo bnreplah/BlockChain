@@ -17,6 +17,7 @@
     "darm:rsm": "node ./darm-ann/clusterRSM.js 4",
     "darm:bench": "node ./darm-ann/bench.js 200 4 10",
     "darm:chaos": "node ./darm-ann/chaos.js 7 21000 30000",
+    "darm:chaos:partition": "node ./darm-ann/chaos.js 6 21500 --partition",
     "darm:loadtest": "node ./darm-ann/loadtest.js 500 25",
     "darm:backup": "node ./darm-ann/backup.js",
     "darm:serve": "node ./app.js 3001 http://localhost:3001",
