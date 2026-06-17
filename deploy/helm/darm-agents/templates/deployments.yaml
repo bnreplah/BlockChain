@@ -1,0 +1,51 @@
+{{- $root := . -}}
+{{- range .Values.agents }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $root.Release.Name }}-agent-{{ .name }}
+  labels:
+    {{- include "darm-agents.labels" $root | nindent 4 }}
+    darm.agent/tier: {{ .tier }}
+    darm.agent/name: {{ .name }}
+spec:
+  replicas: {{ .replicas | default 1 }}
+  selector:
+    matchLabels:
+      darm.agent/name: {{ .name }}
+  template:
+    metadata:
+      labels:
+        {{- include "darm-agents.labels" $root | nindent 8 }}
+        darm.agent/tier: {{ .tier }}
+        darm.agent/name: {{ .name }}
+    spec:
+      {{- with $root.Values.podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          {{- with $root.Values.securityContext }}
+          securityContext: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - { name: AGENT_NAME, value: "{{ .name }}-$(POD_NAME)" }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: AGENT_TIER, value: {{ .tier | quote }} }
+            - { name: AGENT_CAPS, value: {{ .capabilities | default "" | quote }} }
+            - { name: DARM_MODEL_URL, value: {{ $root.Values.model.url | quote }} }
+            - { name: VPN_BACKEND, value: {{ $root.Values.vpn.backend | quote }} }
+            - { name: AGENT_HEARTBEAT_MS, value: {{ $root.Values.heartbeatMs | quote }} }
+            {{- if or $root.Values.tailscale.authKey $root.Values.tailscale.existingSecret }}
+            - name: TS_AUTHKEY
+              valueFrom: { secretKeyRef: { name: {{ include "darm-agents.tsSecret" $root }}, key: TS_AUTHKEY } }
+            {{- end }}
+            {{- if or $root.Values.auth.token $root.Values.auth.existingSecret }}
+            - name: DARM_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "darm-agents.authSecret" $root }}, key: DARM_TOKEN } }
+            {{- end }}
+          resources: {{- toYaml $root.Values.resources | nindent 12 }}
+---
+{{- end }}

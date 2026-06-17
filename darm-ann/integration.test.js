@@ -197,6 +197,44 @@ async function main() {
         fs.rmSync(dir3, { recursive: true, force: true });
       }
     });
+
+    await test('agentic lifecycle: come online → register → route → deregister', async () => {
+      const Agent = require('./agents/agent');
+      // A "dumb router" (narrow) and a worker register against the live model.
+      const router = new Agent({ name: 'dumb-router', tier: 'narrow', capabilities: ['route'], modelUrl: `http://127.0.0.1:${PORT}`, token: TOKEN_OP, vpn: 'local', heartbeatMs: 100000 });
+      const worker = new Agent({ name: 'runner-1', tier: 'worker', capabilities: ['execute', 'run-tool'], modelUrl: `http://127.0.0.1:${PORT}`, token: TOKEN_OP, vpn: 'local', heartbeatMs: 100000 });
+      const know = new Agent({ name: 'brain-1', tier: 'knowledgeable', capabilities: ['route', 'teach', 'query'], modelUrl: `http://127.0.0.1:${PORT}`, token: TOKEN_OP, vpn: 'local', heartbeatMs: 100000 });
+      try {
+        const r1 = await router.online();
+        const r2 = await worker.online();
+        const r3 = await know.online();
+        assert.ok(r1.id && r2.id && r3.id, 'all agents got ids');
+        assert.ok(r1.vpn.ok && r1.vpn.ip, 'VPN (local) brought the agent online with an IP');
+
+        // The registry lists them and aggregates capabilities.
+        const list = await req(PORT, 'GET', '/agents', { token: TOKEN_RO });
+        assert.ok(list.body.stats.total >= 3 && list.body.stats.online >= 3);
+        assert.ok(list.body.capabilities.includes('execute') && list.body.capabilities.includes('teach'));
+
+        // Routing 'route' prefers the narrow dumb-router (lowest capable tier).
+        const route = await req(PORT, 'GET', '/agents/route?capability=route', { token: TOKEN_RO });
+        assert.ok(route.body.ok && route.body.agent.tier === 'narrow', 'dumb router selected for routing');
+        // 'teach' only exists on the knowledgeable tier → escalation.
+        const teach = await req(PORT, 'GET', '/agents/route?capability=teach', { token: TOKEN_RO });
+        assert.ok(teach.body.ok && teach.body.agent.tier === 'knowledgeable');
+        // 'execute' → the worker.
+        const exec = await req(PORT, 'GET', '/agents/route?capability=execute', { token: TOKEN_RO });
+        assert.ok(exec.body.ok && exec.body.agent.tier === 'worker');
+
+        // Discovery via the agent client.
+        const disc = await worker.discover('teach');
+        assert.ok(disc.ok && disc.agent.tier === 'knowledgeable');
+      } finally {
+        await router.offline(); await worker.offline(); await know.offline();
+      }
+      const after = await req(PORT, 'GET', '/agents', { token: TOKEN_RO });
+      assert.strictEqual(after.body.stats.total, 0, 'all agents deregistered on offline()');
+    });
   } finally {
     await stop(server);
     fs.rmSync(dataDir, { recursive: true, force: true });

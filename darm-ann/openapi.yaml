@@ -23,6 +23,7 @@ tags:
   - name: observability
   - name: security
   - name: cluster
+  - name: agents
 components:
   securitySchemes:
     bearerAuth:
@@ -254,3 +255,56 @@ paths:
       summary: Alertmanager webhook receiver
       security: []
       responses: { "200": { description: Received } }
+  /agents/register:
+    post:
+      tags: [agents]
+      summary: Agent comes online and registers its tier + capabilities (operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, tier]
+              properties:
+                name: { type: string }
+                tier: { type: string, enum: [knowledgeable, generalist, narrow, worker] }
+                capabilities: { type: array, items: { type: string } }
+                endpoint: { type: string }
+                vpnIp: { type: string }
+                publicKey: { type: string }
+      responses: { "200": { description: Registered (returns agent id) } }
+  /agents/heartbeat:
+    post:
+      tags: [agents]
+      summary: Refresh an agent's online status (operator)
+      responses: { "200": { description: OK }, "404": { description: Unknown agent } }
+  /agents/deregister:
+    post:
+      tags: [agents]
+      summary: Agent graceful shutdown (operator)
+      responses: { "200": { description: Deregistered } }
+  /agents:
+    get:
+      tags: [agents]
+      summary: List registered agents + capability/tier stats
+      parameters:
+        - { name: tier, in: query, schema: { type: string } }
+        - { name: capability, in: query, schema: { type: string } }
+        - { name: online, in: query, schema: { type: string, enum: ["1"] } }
+      responses: { "200": { description: Agents } }
+  /agents/route:
+    get:
+      tags: [agents]
+      summary: Tier-aware dispatch of a capability to the best agent
+      parameters:
+        - { name: capability, in: query, required: true, schema: { type: string } }
+        - { name: minTier, in: query, schema: { type: string } }
+        - { name: preferTier, in: query, schema: { type: string } }
+      responses: { "200": { description: Routing decision } }
+  /agents/escalation:
+    get:
+      tags: [agents]
+      summary: Ordered fallback chain for a capability (cheapest tier first)
+      parameters: [{ name: capability, in: query, required: true, schema: { type: string } }]
+      responses: { "200": { description: Escalation chain } }

@@ -5,6 +5,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — agentic layer
+- **Agent tiers** (`darm-ann/agents/tiers.js`): knowledgeable / generalist /
+  narrow ("dumb router") / worker (runner-like operating plane).
+- **Linked-list agent registry** (`agents/registry.js`, mirroring the repo's
+  Chain motif) for agentic registration + tool-capability discovery; the model
+  also `observe()`s each registration into memory.
+- **Tier-aware router** (`agents/router.js`): dispatches a capability to the
+  lowest-capable tier that advertises it, escalating upward; LRU spread.
+- **Come-online lifecycle** (`agents/agent.js` + `agents/vpn.js`): join a VPN
+  (Tailscale / generic WireGuard / local) → register tier + capabilities →
+  heartbeat → deregister on shutdown.
+- HTTP endpoints `POST /agents/register|heartbeat|deregister`, `GET /agents`,
+  `GET /agents/route`, `GET /agents/escalation`; `darm_agents{tier}` +
+  `darm_agents_online` metrics.
+- **Deployable templates**: agent Dockerfile with Tailscale built in
+  (`deploy/agent/`), and a `darm-agents` Helm chart that deploys a configurable
+  fleet of agent tiers. Docs in `darm-ann/AGENTS.md`.
+- Tests: agent registry/router/tiers unit tests + a full agentic lifecycle
+  integration test (real Agent client → VPN up → register → route → deregister).
+
 ### Added — testing & docs hardening
 - **Chaos / soak harness** (`darm-ann/chaos.js`, `npm run darm:chaos`): runs the
   multi-process BFT cluster through many heights while randomly killing and

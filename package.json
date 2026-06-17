@@ -20,6 +20,7 @@
     "darm:chaos:partition": "node ./darm-ann/chaos.js 6 21500 --partition",
     "darm:loadtest": "node ./darm-ann/loadtest.js 500 25",
     "darm:backup": "node ./darm-ann/backup.js",
+    "darm:agent": "node ./deploy/agent/runner.js",
     "darm:serve": "node ./app.js 3001 http://localhost:3001",
     "darm:cli": "node ./darm-ann/cli.js"
   },

@@ -294,6 +294,13 @@ partitioned minority, and **safety** under a full network split (no side with a
 `GET /darm/dashboard` (operator UI) · `GET /darm/docs` (Swagger UI) ·
 `GET /darm/openapi.yaml` (OpenAPI 3.1 spec).
 
+**Agentic layer** (see [`AGENTS.md`](AGENTS.md)): `POST /agents/register` ·
+`POST /agents/heartbeat` · `POST /agents/deregister` · `GET /agents` ·
+`GET /agents/route?capability=…` · `GET /agents/escalation?capability=…`. Agents
+come online, join a VPN (Tailscale), and register their **tier** (knowledgeable
+/ generalist / narrow "dumb router" / worker) and tool capabilities into a
+linked-list registry the router walks to dispatch work.
+
 ### Observability (Prometheus + Grafana)
 
 `GET /darm/metrics` exposes the node's state in Prometheus exposition format

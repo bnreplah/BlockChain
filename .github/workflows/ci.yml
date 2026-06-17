@@ -39,11 +39,13 @@ jobs:
         run: docker run --rm -v "$PWD/monitoring:/m" --entrypoint promtool prom/prometheus:latest check rules /m/alerts.yml
       - name: Validate Kubernetes manifests parse
         run: python3 -c "import yaml,sys; list(yaml.safe_load_all(open('deploy/k8s/darm-ann.yaml'))); print('k8s manifest OK')"
-      - name: Lint Helm chart
+      - name: Lint Helm charts (model + agents)
         run: |
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm lint deploy/helm/darm-ann
-          helm template darm deploy/helm/darm-ann >/dev/null && echo "helm template OK"
+          helm template darm deploy/helm/darm-ann >/dev/null && echo "model chart OK"
+          helm lint deploy/helm/darm-agents
+          helm template agents deploy/helm/darm-agents --set tailscale.authKey=test --set auth.token=t >/dev/null && echo "agents chart OK"
 
   docker-smoke:
     name: Docker build + health smoke
@@ -105,6 +107,17 @@ jobs:
           echo "completed tasks: $DONE"; test "$DONE" -ge 1
       - name: HTTP load test (throughput + success rate)
         run: node darm-ann/loadtest.js 300 20 --urls http://localhost:3001 --mode mixed --token ci-token
+      - name: Agent registration + tier-aware routing
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"name":"dumb","tier":"narrow","capabilities":["route"]}' http://localhost:3001/agents/register >/dev/null
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"name":"brain","tier":"knowledgeable","capabilities":["route","teach"]}' http://localhost:3001/agents/register >/dev/null
+          T=$(curl -sf -H "$AUTH" "http://localhost:3001/agents/route?capability=route" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).agent.tier))")
+          echo "route→ $T"; test "$T" = "narrow"
+          T2=$(curl -sf -H "$AUTH" "http://localhost:3001/agents/route?capability=teach" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).agent.tier))")
+          echo "teach→ $T2"; test "$T2" = "knowledgeable"
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_agents{tier="narrow"} 1' && echo "agent metrics ok"
       - name: Tear down
         if: always()
         run: docker rm -f darm || true

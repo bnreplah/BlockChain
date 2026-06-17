@@ -35,7 +35,7 @@ const darmRateLimiter = new RateLimiter({ capacity: DARM_RL_CAP, refillPerSec: D
 const darmAudit = new AuditLog({ file: process.env.DARM_AUDIT_FILE || null, max: 2000 });
 function tokenOf(req){ const h = req.headers['authorization'] || ''; return h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || ''); }
 app.use((req, res, next)=>{
-    if (!req.path.startsWith('/darm/')) return next(); // only guard DARM API
+    if (!req.path.startsWith('/darm/') && !req.path.startsWith('/agents/')) return next(); // guard DARM + agent APIs
     if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape/alerts exempt
     const token = tokenOf(req);
     // Auth (RBAC) — skipped entirely when no tokens configured.
@@ -133,6 +133,15 @@ const TaskManager = require('./darm-ann/taskManager');
 const darmTasks = new TaskManager({ max: 200 });
 // Record autorun background cycles as tasks so the monitor shows ongoing work.
 darm._taskHook = (type, result) => { const t = darmTasks.create(type, { label: type + ' (auto)' }); darmTasks.start(t.id); darmTasks.finish(t.id, result); };
+
+// ── Agentic layer: registry (linked list) + tier-aware router ──────────────
+const AgentRegistry = require('./darm-ann/agents/registry');
+const AgentRouter = require('./darm-ann/agents/router');
+const darmAgents = new AgentRegistry({ heartbeatTimeoutMs: Number(process.env.AGENT_HEARTBEAT_TIMEOUT_MS || 60000) });
+const darmAgentRouter = new AgentRouter(darmAgents);
+// Reap stale agents periodically so the registry reflects who is actually online.
+const darmAgentReaper = setInterval(() => darmAgents.reapStale(), 30000);
+if (darmAgentReaper.unref) darmAgentReaper.unref();
 
 // Periodic durable snapshot to the persistent volume (production deploy). The
 // interval (ms) is DARM_SNAPSHOT_MS; 0 disables. Default 60s when a path is set.
@@ -338,6 +347,61 @@ app.post("/darm/triage", async (req, res)=>{
 // state: Sigma(t) snapshot of tier occupancies and the associative graph
 app.get("/darm/state", (req, res)=>{
     res.json(darm.state());
+});
+
+// ************************************************************************
+// Agentic registration + tool-capability discovery (linked-list registry)
+// ************************************************************************
+
+// register: an agent comes online and registers its tier + capabilities
+// (operator scope). Returns the assigned agent id.
+app.post("/agents/register", (req, res)=>{
+    try {
+        const rec = darmAgents.register({
+            id: req.body.id, name: req.body.name, tier: req.body.tier,
+            capabilities: req.body.capabilities || [], endpoint: req.body.endpoint || null,
+            vpnIp: req.body.vpnIp || null, publicKey: req.body.publicKey || null, meta: req.body.meta || {},
+        });
+        // Record the agent's capabilities into the model's memory so the model
+        // "knows" what tools exist (observed; consolidates over time).
+        try { darm.observe({ claim: `agent ${rec.name} (${rec.tier}) provides capabilities: ${rec.capabilities.join(', ')}`, reward: 0.6, epistemic: { conf_cal: 0.75, u_ep: 0.2 } }); } catch (_e) {}
+        res.json({ note: "agent registered", id: rec.id, tier: rec.tier, capabilities: rec.capabilities });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// heartbeat: keep an agent marked online (operator scope)
+app.post("/agents/heartbeat", (req, res)=>{
+    const rec = darmAgents.heartbeat(req.body.id);
+    if (!rec) return res.status(404).json({ error: "unknown agent" });
+    res.json({ ok: true, lastSeen: rec.lastSeen });
+});
+
+// deregister: graceful agent shutdown (operator scope)
+app.post("/agents/deregister", (req, res)=>{
+    res.json({ ok: darmAgents.deregister(req.body.id) });
+});
+
+// list: all registered agents (read scope), filterable by tier/capability
+app.get("/agents", (req, res)=>{
+    res.json({
+        stats: darmAgents.stats(),
+        capabilities: darmAgents.capabilities(),
+        agents: darmAgents.list({ tier: req.query.tier || null, capability: req.query.capability || null, onlineOnly: req.query.online === '1' }),
+    });
+});
+
+// route: dispatch a capability to the best agent (read scope) — tier-aware
+app.get("/agents/route", (req, res)=>{
+    const cap = req.query.capability;
+    if (!cap) return res.status(400).json({ error: "capability query param required" });
+    res.json(darmAgentRouter.route(cap, { minTier: req.query.minTier || null, preferTier: req.query.preferTier || null }));
+});
+
+// escalation: ordered fallback chain for a capability (read scope)
+app.get("/agents/escalation", (req, res)=>{
+    const cap = req.query.capability;
+    if (!cap) return res.status(400).json({ error: "capability query param required" });
+    res.json({ capability: cap, chain: darmAgentRouter.escalationChain(cap) });
 });
 
 // navigate: model-directed traversal of the Markov chain-graph (TinyLM-steered)
@@ -549,6 +613,7 @@ app.get("/darm/metrics", (req, res)=>{
         networkNodes: (Bcoin.networkNode || []).length,
         tasks: darmTasks.summary(),
         buildInfo: darmVersion.info(),
+        agents: darmAgents.stats(),
     });
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(text);

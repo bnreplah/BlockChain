@@ -47,6 +47,14 @@ function render(darm, extra = {}) {
     out += `# HELP darm_build_info Build/version info (constant 1; value in labels)\n# TYPE darm_build_info gauge\n`;
     out += `darm_build_info{version="${esc(b.version)}",commit="${esc(b.commit)}",paper="${esc(b.paperVersion)}",node="${esc(b.node)}"} 1\n`;
   }
+  if (extra.agents) {
+    const a = extra.agents;
+    out += `# HELP darm_agents Registered agents by tier\n# TYPE darm_agents gauge\n`;
+    for (const tier of (a.tierOrder || Object.keys(a.byTier || {}))) {
+      out += `darm_agents{tier="${tier}"} ${(a.byTier && a.byTier[tier]) || 0}\n`;
+    }
+    out += line('darm_agents_online', 'Agents currently online (heartbeat fresh)', 'gauge', a.online || 0);
+  }
   return out;
 }
 

@@ -1159,6 +1159,93 @@ section('bench (throughput pipeline)');
   });
 }
 
+// ───────────────────────── agentic layer ─────────────────────────
+section('agents/registry (linked-list registration)');
+{
+  const AgentRegistry = require('./agents/registry');
+  test('register appends links and assigns ids; list is in order', () => {
+    const r = new AgentRegistry();
+    const a = r.register({ name: 'know-1', tier: 'knowledgeable', capabilities: ['teach', 'query'] });
+    const b = r.register({ name: 'work-1', tier: 'worker', capabilities: ['execute'] });
+    assert.ok(a.id && b.id && a.id !== b.id);
+    assert.strictEqual(r.size, 2);
+    const list = r.list();
+    assert.deepStrictEqual(list.map((x) => x.name), ['know-1', 'work-1']);
+  });
+  test('re-register by id updates in place (no duplicate link)', () => {
+    const r = new AgentRegistry();
+    const a = r.register({ name: 'a', tier: 'worker', capabilities: ['execute'] });
+    r.register({ id: a.id, name: 'a', tier: 'worker', capabilities: ['execute', 'run-tool'] });
+    assert.strictEqual(r.size, 1);
+    assert.deepStrictEqual(r.get(a.id).capabilities, ['execute', 'run-tool']);
+  });
+  test('findByCapability returns rank-ascending online agents', () => {
+    const r = new AgentRegistry();
+    r.register({ name: 'k', tier: 'knowledgeable', capabilities: ['route'] });
+    r.register({ name: 'n', tier: 'narrow', capabilities: ['route'] });
+    r.register({ name: 'g', tier: 'generalist', capabilities: ['route'] });
+    const found = r.findByCapability('route');
+    assert.deepStrictEqual(found.map((x) => x.tier), ['narrow', 'generalist', 'knowledgeable']);
+  });
+  test('reapStale marks lapsed agents offline; deregister unlinks', () => {
+    const r = new AgentRegistry({ heartbeatTimeoutMs: 10 });
+    const a = r.register({ name: 'a', tier: 'worker', capabilities: ['execute'] });
+    r.reapStale(Date.now() + 1000);
+    assert.strictEqual(r.get(a.id).status, 'offline');
+    assert.ok(r.deregister(a.id));
+    assert.strictEqual(r.size, 0);
+  });
+  test('toJSON/load round-trips the linked list', () => {
+    const r = new AgentRegistry();
+    r.register({ name: 'a', tier: 'generalist', capabilities: ['route', 'reason'] });
+    r.register({ name: 'b', tier: 'worker', capabilities: ['execute'] });
+    const r2 = new AgentRegistry().load(r.toJSON());
+    assert.strictEqual(r2.size, 2);
+    assert.deepStrictEqual(r2.list().map((x) => x.name), ['a', 'b']);
+  });
+}
+
+section('agents/router (tier-aware dispatch)');
+{
+  const AgentRegistry = require('./agents/registry');
+  const AgentRouter = require('./agents/router');
+  test('prefers the lowest-capable tier that advertises the capability', () => {
+    const r = new AgentRegistry();
+    r.register({ name: 'k', tier: 'knowledgeable', capabilities: ['route', 'query'] });
+    r.register({ name: 'dumb', tier: 'narrow', capabilities: ['route'] });
+    const out = new AgentRouter(r).route('route');
+    assert.ok(out.ok && out.agent.tier === 'narrow', 'dumb router picked for plain routing');
+  });
+  test('escalates to a higher tier when only it has the capability', () => {
+    const r = new AgentRegistry();
+    r.register({ name: 'dumb', tier: 'narrow', capabilities: ['route'] });
+    r.register({ name: 'k', tier: 'knowledgeable', capabilities: ['route', 'teach'] });
+    const out = new AgentRouter(r).route('teach');
+    assert.ok(out.ok && out.agent.tier === 'knowledgeable');
+  });
+  test('no agent → ok:false; LRU spreads within a tier', () => {
+    const r = new AgentRegistry();
+    assert.strictEqual(new AgentRouter(r).route('nope').ok, false);
+    r.register({ name: 'w1', tier: 'worker', capabilities: ['execute'] });
+    r.register({ name: 'w2', tier: 'worker', capabilities: ['execute'] });
+    const router = new AgentRouter(r);
+    const first = router.route('execute').agent.id;
+    const second = router.route('execute').agent.id;
+    assert.notStrictEqual(first, second, 'consecutive routes spread across workers');
+  });
+}
+
+section('agents/tiers');
+{
+  const { TIERS, ascending, rankOf, isTier } = require('./agents/tiers');
+  test('four tiers ordered worker < narrow < generalist < knowledgeable', () => {
+    assert.deepStrictEqual(ascending(), ['worker', 'narrow', 'generalist', 'knowledgeable']);
+    assert.ok(rankOf('knowledgeable') > rankOf('worker'));
+    assert.ok(isTier('narrow') && !isTier('bogus'));
+    assert.ok(TIERS.narrow.canRoute && !TIERS.worker.canRoute);
+  });
+}
+
 section('metrics (Prometheus exposition)');
 {
   const metrics = require('./metrics');
