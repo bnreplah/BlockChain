@@ -15,6 +15,8 @@ vpn:
 tailscale:
   authKey: ""                 # tskey-... (creates a Secret if set)
   existingSecret: ""          # or reference an existing Secret with key TS_AUTHKEY
+  loginServer: ""             # control/login URL (e.g. self-hosted Headscale);
+                              # empty → Tailscale's default coordination server
 
 # Operator token agents present when registering (model RBAC).
 auth:

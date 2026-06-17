@@ -26,6 +26,7 @@ class Agent {
     token = process.env.DARM_TOKEN || process.env.DARM_CLUSTER_TOKEN || '',
     vpn = process.env.VPN_BACKEND || 'local',
     vpnOpts = {},
+    loginServer = process.env.TS_LOGIN_SERVER || '',   // Tailscale control/login URL
     port = Number(process.env.AGENT_PORT || 0),
     heartbeatMs = Number(process.env.AGENT_HEARTBEAT_MS || 20000),
     meta = {},
@@ -37,7 +38,8 @@ class Agent {
     this.capabilities = capabilities || TIERS[tier].defaultCapabilities.slice();
     this.modelUrl = (modelUrl || process.env.DARM_MODEL_URL || 'http://localhost:3001').replace(/\/$/, '');
     this.token = token;
-    this.vpnAdapter = adapterFor(vpn, vpnOpts);
+    // loginServer (configured Tailscale control URL) folds into the adapter opts.
+    this.vpnAdapter = adapterFor(vpn, { loginServer: loginServer || undefined, ...vpnOpts });
     this.port = port;
     this.heartbeatMs = heartbeatMs;
     this.meta = meta;

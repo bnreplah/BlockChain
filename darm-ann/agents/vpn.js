@@ -24,21 +24,28 @@ function run(cmd, args, timeoutMs = 15000) {
 /**
  * Tailscale adapter. Uses `tailscale up` with an auth key (from opts or
  * TS_AUTHKEY) and reads the assigned 100.x IP from `tailscale ip -4`.
+ * The coordination/control server URL is configurable (opts.loginServer or
+ * TS_LOGIN_SERVER) — e.g. a self-hosted Headscale or a custom control plane;
+ * when unset, Tailscale's default coordination server is used.
  * Designed to run inside the agent container (see deploy/agent/*).
  */
 function tailscaleAdapter(opts = {}) {
   const authKey = opts.authKey || process.env.TS_AUTHKEY || '';
   const hostname = opts.hostname || process.env.TS_HOSTNAME || os.hostname();
+  const loginServer = opts.loginServer || process.env.TS_LOGIN_SERVER || '';
   return {
     name: 'tailscale',
+    loginServer: loginServer || null,
     async up() {
       const args = ['up', '--accept-routes', `--hostname=${hostname}`];
+      if (loginServer) args.push(`--login-server=${loginServer}`);
       if (authKey) args.push(`--authkey=${authKey}`);
       const upRes = await run('tailscale', args, 30000);
       const ipRes = await run('tailscale', ['ip', '-4'], 8000);
       const ip = (ipRes.stdout.split('\n').map((s) => s.trim()).find(Boolean)) || null;
       const ok = upRes.code === 0 && !!ip;
-      return { ok, ip, backend: 'tailscale', detail: ok ? `joined as ${hostname}` : (upRes.stderr || ipRes.stderr || 'tailscale up failed') };
+      const where = loginServer ? ` via ${loginServer}` : '';
+      return { ok, ip, backend: 'tailscale', loginServer: loginServer || null, detail: ok ? `joined as ${hostname}${where}` : (upRes.stderr || ipRes.stderr || 'tailscale up failed') };
     },
     async down() { await run('tailscale', ['down'], 8000); },
   };

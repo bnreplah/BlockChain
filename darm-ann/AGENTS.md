@@ -35,7 +35,11 @@ which tools exist and consolidates that over time.
 ## Come-online lifecycle (`agents/agent.js`)
 
 1. **VPN up** — `agents/vpn.js` adapter (`tailscale` | `generic`/WireGuard |
-   `local`) joins the private network and returns the agent's address.
+   `local`) joins the private network and returns the agent's address. For
+   Tailscale, the **control/login server URL is configurable** (`loginServer`
+   option / `TS_LOGIN_SERVER` env / chart `tailscale.loginServer`) so agents can
+   point at a self-hosted Headscale or custom control plane; unset uses
+   Tailscale's default coordination server.
 2. **Register** — `POST /agents/register` with tier + capabilities → agent id.
 3. **Heartbeat** — periodic `POST /agents/heartbeat` keeps it `online`
    (stale agents are reaped to `offline`).
@@ -80,6 +84,7 @@ workers):
 helm install agents deploy/helm/darm-agents \
   --set model.url=http://darm-ann.darm-ann.svc.cluster.local:3001 \
   --set tailscale.authKey=tskey-... \
+  --set tailscale.loginServer=https://headscale.example.net \
   --set auth.token=op-token
 ```
 

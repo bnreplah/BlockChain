@@ -1246,6 +1246,26 @@ section('agents/tiers');
   });
 }
 
+section('agents/vpn (configurable Tailscale login server)');
+{
+  const { tailscaleAdapter, adapterFor } = require('./agents/vpn');
+  const Agent = require('./agents/agent');
+  test('login server is configurable via opts and threads through adapterFor', () => {
+    const a = tailscaleAdapter({ loginServer: 'https://headscale.example.net' });
+    assert.strictEqual(a.loginServer, 'https://headscale.example.net');
+    const b = adapterFor('tailscale', { loginServer: 'https://control.acme' });
+    assert.strictEqual(b.loginServer, 'https://control.acme');
+  });
+  test('Agent forwards loginServer config into its Tailscale adapter', () => {
+    const agent = new Agent({ name: 'x', tier: 'worker', vpn: 'tailscale', loginServer: 'https://ctrl.local', modelUrl: 'http://m' });
+    assert.strictEqual(agent.vpnAdapter.loginServer, 'https://ctrl.local');
+  });
+  test('default (no login server) leaves it null — uses Tailscale default coordinator', () => {
+    const a = tailscaleAdapter({});
+    assert.strictEqual(a.loginServer, null);
+  });
+}
+
 section('metrics (Prometheus exposition)');
 {
   const metrics = require('./metrics');

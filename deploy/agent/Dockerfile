@@ -22,6 +22,7 @@ COPY . .
 ARG GIT_COMMIT=unknown
 ENV DARM_GIT_COMMIT=${GIT_COMMIT} \
     VPN_BACKEND=local \
+    TS_LOGIN_SERVER="" \
     AGENT_TIER=worker \
     AGENT_CAPS="" \
     DARM_MODEL_URL=http://localhost:3001 \

@@ -38,6 +38,9 @@ spec:
             - { name: DARM_MODEL_URL, value: {{ $root.Values.model.url | quote }} }
             - { name: VPN_BACKEND, value: {{ $root.Values.vpn.backend | quote }} }
             - { name: AGENT_HEARTBEAT_MS, value: {{ $root.Values.heartbeatMs | quote }} }
+            {{- if $root.Values.tailscale.loginServer }}
+            - { name: TS_LOGIN_SERVER, value: {{ $root.Values.tailscale.loginServer | quote }} }
+            {{- end }}
             {{- if or $root.Values.tailscale.authKey $root.Values.tailscale.existingSecret }}
             - name: TS_AUTHKEY
               valueFrom: { secretKeyRef: { name: {{ include "darm-agents.tsSecret" $root }}, key: TS_AUTHKEY } }

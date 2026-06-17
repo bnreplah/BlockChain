@@ -10,7 +10,8 @@
  *   AGENT_NAME, AGENT_TIER (worker|narrow|generalist|knowledgeable),
  *   AGENT_CAPS (comma list; default = tier defaults),
  *   DARM_MODEL_URL, DARM_TOKEN (or DARM_CLUSTER_TOKEN),
- *   VPN_BACKEND (tailscale|generic|local), TS_AUTHKEY, AGENT_PORT,
+ *   VPN_BACKEND (tailscale|generic|local), TS_AUTHKEY,
+ *   TS_LOGIN_SERVER (Tailscale/Headscale control URL), AGENT_PORT,
  *   AGENT_HEARTBEAT_MS.
  */
 
@@ -25,6 +26,7 @@ const agent = new Agent({
   modelUrl: process.env.DARM_MODEL_URL,
   token: process.env.DARM_TOKEN || process.env.DARM_CLUSTER_TOKEN || '',
   vpn: process.env.VPN_BACKEND || 'local',
+  loginServer: process.env.TS_LOGIN_SERVER || '',   // Tailscale control/login URL
   port: Number(process.env.AGENT_PORT || 0),
   heartbeatMs: Number(process.env.AGENT_HEARTBEAT_MS || 20000),
   meta: { image: 'darm-agent', commit: process.env.DARM_GIT_COMMIT || 'unknown' },
