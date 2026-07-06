@@ -1266,6 +1266,170 @@ section('agents/vpn (configurable Tailscale login server)');
   });
 }
 
+// ───────────────────────── v7.2 Distributed AI Lens (fabric) ─────────────────────────
+section('fabric/acs (ACS identity + signed advertisements)');
+{
+  const ACS = require('./fabric/acs');
+  const crypto = require('crypto');
+  test('ACSN is the Ed25519 identity; advertisements are signed + verifiable', () => {
+    const acs = ACS.fromSeed(crypto.createHash('sha256').update('a').digest(), { name: 'a' });
+    assert.ok(acs.acsn && acs.publicKeyB64);
+    const ad = acs.advertise({ model_classes: ['tinylm'], trust_score: 0.9, latency_class: 5, sync_classes: ['async'], conf_classes: ['redact'] });
+    assert.strictEqual(ad.type, 'ADVERTISE');
+    assert.ok(ACS.verifyAdvertisement(ad), 'signature verifies');
+    const tampered = { ...ad, capability: { ...ad.capability, trust_score: 0.1 } };
+    assert.ok(!ACS.verifyAdvertisement(tampered), 'tampered advertisement rejected');
+  });
+  test('expired advertisements are rejected; WITHDRAW is signed', () => {
+    const acs = ACS.fromSeed(crypto.createHash('sha256').update('b').digest());
+    const ad = acs.advertise({ model_classes: ['x'] }, { ttlMs: 1 });
+    assert.ok(!ACS.verifyAdvertisement(ad, Date.now() + 10), 'expired ad invalid');
+    const w = acs.withdraw(ad.id);
+    assert.strictEqual(w.type, 'WITHDRAW');
+    assert.ok(ACS.verifyAdvertisement(w, 0), 'signed WITHDRAW verifies');
+  });
+  test('peering policy: open peers all; selective peers allow-list only', () => {
+    const open = ACS.fromSeed(crypto.createHash('sha256').update('o').digest());
+    assert.ok(open.peersWith('anyone'));
+    const sel = new ACS({ peering: { mode: 'selective', allow: ['friend'] } });
+    assert.ok(sel.peersWith('friend') && !sel.peersWith('stranger'));
+  });
+}
+
+section('fabric/dirp (trust-pruned Dijkstra routing)');
+{
+  const RIB = require('./fabric/rib');
+  const ACS = require('./fabric/acs');
+  const dirp = require('./fabric/dirp');
+  const crypto = require('crypto');
+
+  function acsWith(seed, cap) {
+    const a = ACS.fromSeed(crypto.createHash('sha256').update(seed).digest());
+    return { acs: a, ad: a.advertise(cap) };
+  }
+
+  test('routes to the matching provider; hop path returned (P64 loop-free)', () => {
+    const rib = new RIB();
+    const origin = acsWith('O', { model_classes: ['route'], trust_score: 0.95, latency_class: 1, sync_classes: ['async'], conf_classes: ['redact'] });
+    const prov = acsWith('P', { model_classes: ['tinylm'], trust_score: 0.9, latency_class: 5, price_curve: 2, sync_classes: ['async'], conf_classes: ['redact'] });
+    rib.ingestAdvertise(origin.ad); rib.ingestAdvertise(prov.ad);
+    rib.addPeering(origin.acs.acsn, prov.acs.acsn);
+    const sel = dirp.selectRoute(rib, { originAcsn: origin.acs.acsn, match: (c) => c.model_classes.includes('tinylm'), constraints: { sync_class: 'async', conf_class: 'redact' } });
+    assert.ok(sel.ok && sel.target === prov.acs.acsn && sel.hops === 1);
+  });
+  test('trust floor prunes low-trust hops', () => {
+    const rib = new RIB();
+    const origin = acsWith('O2', { model_classes: ['route'], trust_score: 0.9, latency_class: 1, sync_classes: ['async'], conf_classes: ['redact'] });
+    const bad = acsWith('BAD', { model_classes: ['tinylm'], trust_score: 0.2, latency_class: 1, sync_classes: ['async'], conf_classes: ['redact'] });
+    rib.ingestAdvertise(origin.ad); rib.ingestAdvertise(bad.ad);
+    rib.addPeering(origin.acs.acsn, bad.acs.acsn);
+    const sel = dirp.selectRoute(rib, { originAcsn: origin.acs.acsn, match: (c) => c.model_classes.includes('tinylm'), constraints: {}, opts: { trustFloor: 0.5 } });
+    assert.ok(!sel.ok, 'low-trust provider pruned below floor');
+  });
+  test('ACS-path loop prevention (P64) drops jobs whose path contains me', () => {
+    const hdr = dirp.buildRouteHeader({ job_class: 'inference', acsPath: ['a', 'b'] });
+    assert.ok(dirp.wouldLoop(hdr, 'a') && !dirp.wouldLoop(hdr, 'c'));
+  });
+  test('neutrality (P81): cost uses only advertised properties, cheaper path wins', () => {
+    const rib = new RIB();
+    const origin = acsWith('O3', { model_classes: ['route'], trust_score: 0.95, latency_class: 1, sync_classes: ['async'], conf_classes: ['redact'] });
+    const cheap = acsWith('CHEAP', { model_classes: ['tinylm'], trust_score: 0.9, latency_class: 2, price_curve: 1, sync_classes: ['async'], conf_classes: ['redact'] });
+    const dear = acsWith('DEAR', { model_classes: ['tinylm'], trust_score: 0.9, latency_class: 2, price_curve: 50, sync_classes: ['async'], conf_classes: ['redact'] });
+    [origin, cheap, dear].forEach((x) => rib.ingestAdvertise(x.ad));
+    rib.addPeering(origin.acs.acsn, cheap.acs.acsn); rib.addPeering(origin.acs.acsn, dear.acs.acsn);
+    const sel = dirp.selectRoute(rib, { originAcsn: origin.acs.acsn, match: (c) => c.model_classes.includes('tinylm'), constraints: {} });
+    assert.strictEqual(sel.target, cheap.acs.acsn, 'lowest-cost provider chosen');
+  });
+}
+
+section('fabric/privacy (conf ladder + onion routing)');
+{
+  const priv = require('./fabric/privacy');
+  test('conf ladder rungs are ordered redact<attested<blind<sealed', () => {
+    assert.ok(priv.rungOf('redact') < priv.rungOf('attested'));
+    assert.ok(priv.rungOf('attested') < priv.rungOf('blind'));
+    assert.ok(priv.rungOf('blind') < priv.rungOf('sealed'));
+  });
+  test('rung-0 redaction strips identifiers', () => {
+    const r = priv.redact('mail bob@x.com from 10.0.0.1 id 123456789');
+    assert.ok(/<email>/.test(r) && /<ip>/.test(r) && /<num>/.test(r));
+  });
+  test('onion requires >=3 relays (P65); builds + peels to redacted exit', () => {
+    assert.ok(!priv.validate({ privacy_mode: 'onion', conf_class: 'redact', hops: 2 }).ok);
+    assert.ok(priv.validate({ privacy_mode: 'onion', conf_class: 'redact', hops: 3 }).ok);
+    const relays = [priv.newRelayIdentity(), priv.newRelayIdentity(), priv.newRelayIdentity()].map((r, i) => ({ acsn: 'r' + i, publicKeyRaw: r.publicKeyRaw, priv: r.privateKey }));
+    const { onion, ephemerals } = priv.buildOnion('secret user@x.com', relays);
+    let cur = onion, delivered = null;
+    for (let i = 0; i < 3; i++) { const p = priv.peelOnion(relays[i].priv, ephemerals[i], cur); if (p.delivered != null) { delivered = p.delivered; break; } cur = p.inner; }
+    assert.ok(delivered && delivered.includes('<email>') && !delivered.includes('user@x.com'));
+  });
+}
+
+section('fabric/ccil (roles + PoUI economics)');
+{
+  const CCIL = require('./fabric/ccil');
+  test('role ladder: stake+uptime+bvas elevates LEAF→ANCHOR', () => {
+    const c = new CCIL({ stakeMin: 100 });
+    c.attach('n1', { stake: 500, uptime: 0.995, bvas: 0.9 });
+    assert.strictEqual(c.role('n1'), 'LEAF');
+    c.reconcile('n1');
+    assert.strictEqual(c.role('n1'), 'ANCHOR');
+  });
+  test('P67 undetected fraud = (1-q)^k; P68 S_min = (1-q)/q·gain', () => {
+    const c = new CCIL({ q: 0.2 });
+    assert.ok(Math.abs(c.undetectedFraudProbability(3) - Math.pow(0.8, 3)) < 1e-9);
+    assert.ok(Math.abs(c.minStakeForIncentiveCompatibility(100) - (0.8 / 0.2) * 100) < 1e-6);
+  });
+  test('slash reduces stake + demotes; validator sortition elects from anchors', () => {
+    const c = new CCIL({ stakeMin: 100 });
+    ['a', 'b', 'c'].forEach((n) => { c.attach(n, { stake: 300, uptime: 0.995, bvas: 0.9 }); c.reconcile(n); });
+    const elected = c.electValidators(2, 42);
+    assert.strictEqual(elected.length, 2);
+    assert.ok(elected.every((n) => c.role(n) === 'VALIDATOR'));
+    c.slash('a', 'false-attest');
+    assert.notStrictEqual(c.role('a'), 'VALIDATOR');
+  });
+}
+
+section('fabric/sal (provider classes + rail registry)');
+{
+  const SAL = require('./fabric/sal');
+  test('adapter conformance gates registration (P79 substrate independence)', () => {
+    const sal = new SAL();
+    const good = new SAL.AdapterACS({ acsn: 'x', providerClass: 'CSP', profile: { sync_classes: ['async'], conf_classes: ['redact'], price_curve: 1, attest: true } });
+    assert.ok(sal.registerAdapter(good).ok);
+    const bad = new SAL.AdapterACS({ acsn: 'y', providerClass: 'CSP', profile: { sync_classes: ['async'] } });
+    assert.ok(!sal.registerAdapter(bad).ok, 'non-conforming CSP rejected');
+  });
+  test('rail registry: SETTLE validated against a profile; P82 liveness', () => {
+    const sal = new SAL();
+    assert.ok(!sal.settlementLive(), 'no rails → settlement not live');
+    const r = sal.registerRail({ finality_bound: 5000, proof_format: 'merkle', escrow_primitive: 'htlc', dispute_hook: 'arb', denomination: 'credit' });
+    assert.ok(r.ok && sal.settlementLive());
+    const v = sal.validateSettle({ rail_id: r.rail_id, proof: 'p', amount: 5 });
+    assert.ok(v.ok);
+    assert.ok(!sal.validateSettle({ rail_id: 'nope', proof: 'p' }).ok);
+  });
+}
+
+section('fabric (end-to-end lifecycle)');
+{
+  const Fabric = require('./fabric');
+  const crypto = require('crypto');
+  test('ADVERTISE→ROUTE→execute→ATTEST→SETTLE across two ACSs', async () => {
+    const A = Fabric.fromSeed(crypto.createHash('sha256').update('tA').digest(), { ccil: { stake: 600, uptime: 1, bvas: 0.9 } });
+    const B = Fabric.fromSeed(crypto.createHash('sha256').update('tB').digest());
+    const ad = B.advertise({ model_classes: ['tinylm'], trust_score: 0.9, latency_class: 5, price_curve: 2, sync_classes: ['async'], conf_classes: ['redact'] });
+    A.gossipIn(ad); A.peerWith(B.acsn); A.ccil.attach(B.acsn, { stake: 800, uptime: 0.99, bvas: 0.9 });
+    A.sal.registerRail({ finality_bound: 5000, proof_format: 'merkle', escrow_primitive: 'htlc', dispute_hook: 'arb', denomination: 'credit' });
+    const res = await A.runJob({ payload: 'contact bob@x.com', budget: 10 }, { match: (c) => c.model_classes.includes('tinylm'), sync_class: 'async', conf_class: 'redact' });
+    assert.ok(res.ok && res.route.target === B.acsn);
+    assert.ok(/<email>/.test(JSON.stringify(res.output)), 'redaction applied at egress');
+    assert.ok(Fabric.verifyAttest(res.attest), 'ATTEST verifies');
+    assert.ok(res.settle && res.settle.valid, 'SETTLE valid');
+  });
+}
+
 section('metrics (Prometheus exposition)');
 {
   const metrics = require('./metrics');

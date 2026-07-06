@@ -104,7 +104,7 @@ async function main() {
     await test('version + ready are open and report build info', async () => {
       const v = await req(PORT, 'GET', '/darm/version');
       assert.strictEqual(v.status, 200);
-      assert.ok(v.body.version && v.body.paperVersion === '6.0');
+      assert.ok(v.body.version && v.body.paperVersion === '7.2');
       const r = await req(PORT, 'GET', '/darm/ready');
       assert.strictEqual(r.status, 200);
     });
@@ -234,6 +234,36 @@ async function main() {
       }
       const after = await req(PORT, 'GET', '/agents', { token: TOKEN_RO });
       assert.strictEqual(after.body.stats.total, 0, 'all agents deregistered on offline()');
+    });
+
+    await test('v7.2 fabric: ACS state, capability advertise, and DIRP-1 job lifecycle', async () => {
+      // Node is an ACS with a role earned from its stake/uptime/bvas.
+      const st = await req(PORT, 'GET', '/fabric/state', { token: TOKEN_RO });
+      assert.ok(st.body.acsn && ['LEAF', 'RELAY', 'ANCHOR', 'VALIDATOR'].includes(st.body.role));
+      assert.ok(st.body.advertisements >= 1, 'node self-advertised a capability');
+
+      // A second ACS (peer) advertises a tinylm capability; we gossip it in + peer.
+      const Fabric = require('./fabric');
+      const peer = Fabric.fromSeed(require('crypto').createHash('sha256').update('int-peer').digest());
+      const ad = peer.advertise({ model_classes: ['tinylm'], trust_score: 0.9, latency_class: 5, price_curve: 2, sync_classes: ['async'], conf_classes: ['redact'] });
+      const g = await req(PORT, 'POST', '/fabric/gossip', { token: TOKEN_OP, body: { record: ad } });
+      assert.ok(g.body.ok, 'peer advertisement ingested');
+      await req(PORT, 'POST', '/fabric/peer', { token: TOKEN_OP, body: { acsn: peer.acsn } });
+
+      // Register a settlement rail so SETTLE works.
+      const rail = await req(PORT, 'POST', '/fabric/rails', { token: TOKEN_OP, body: { finality_bound: 5000, proof_format: 'merkle', escrow_primitive: 'htlc', dispute_hook: 'arb', denomination: 'credit' } });
+      assert.ok(rail.body.ok, 'rail registered');
+
+      // Route + run a job to the tinylm provider (async / redact).
+      const job = await req(PORT, 'POST', '/fabric/job', { token: TOKEN_OP, body: { model_class: 'tinylm', payload: 'reach analyst alice@corp.com', budget: 8, sync_class: 'async', conf_class: 'redact' } });
+      assert.ok(job.body.ok, 'job routed + executed: ' + JSON.stringify(job.body).slice(0, 120));
+      assert.strictEqual(job.body.route.target, peer.acsn, 'routed to the advertising peer');
+      assert.ok(/<email>/.test(JSON.stringify(job.body.output)), 'rung-0 redaction applied');
+      assert.ok(job.body.settle && job.body.settle.valid, 'settled on the registered rail');
+
+      // Fabric metrics are exposed.
+      const m = await req(PORT, 'GET', '/darm/metrics');
+      assert.ok(/darm_fabric_advertisements \d+/.test(m.raw) && /darm_fabric_settlement_live 1/.test(m.raw));
     });
   } finally {
     await stop(server);

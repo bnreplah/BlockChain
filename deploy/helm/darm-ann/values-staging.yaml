@@ -1,0 +1,52 @@
+# Staging overrides for the darm-ann (model) chart.
+#   helm install darm deploy/helm/darm-ann -n darm-ann --create-namespace \
+#     -f deploy/helm/darm-ann/values-staging.yaml \
+#     --set image.repository=<registry>/darm-ann --set image.tag=<tag>
+#
+# Provide real secrets out-of-band (do NOT commit them):
+#   kubectl -n darm-ann create secret generic darm-tokens \
+#     --from-literal=DARM_TOKENS='ops-secret:operator,ro-secret:read' \
+#     --from-literal=DARM_CLUSTER_TOKEN='cluster-secret'
+replicaCount: 3
+
+image:
+  pullPolicy: IfNotPresent
+
+# Reference the externally-created Secret rather than inlining tokens.
+tokens:
+  existingSecret: darm-tokens
+
+config:
+  minAgeMs: "60000"          # production consolidation gate (not 0)
+  snapshotIntervalMs: "60000"
+  autoRemediate: "1"
+
+persistence:
+  enabled: true
+  size: 2Gi
+  # storageClass: <your-rwo-class>
+
+# Keep a BFT quorum available during rolling updates / node drains.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Prometheus Operator present in staging → scrape /darm/metrics.
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+# Off in first staging; enable once traffic patterns are known.
+autoscaling:
+  enabled: false
+
+# Lock down pod-to-pod traffic; allow monitoring + ingress namespaces.
+networkPolicy:
+  enabled: true
+  allowFromNamespaces: ["monitoring", "ingress-nginx"]
+
+resources:
+  requests: { cpu: "150m", memory: "192Mi" }
+  limits: { cpu: "1", memory: "512Mi" }
+
+terminationGracePeriodSeconds: 25   # allow snapshot-on-shutdown to complete

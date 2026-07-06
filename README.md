@@ -17,6 +17,11 @@ Memory Network*) memory hierarchy.
 
 **New here? Start with the hands-on [Getting Started tutorial](darm-ann/TUTORIAL.md).**
 
+Implements **DARM-ANN v7.2** ("The Distributed AI Lens"): each node is an
+Autonomous Cognitive System (ACS) that routes jobs between subnets via DIRP-1 —
+see the [fabric layer](darm-ann/FABRIC.md) and the [agent tiers](darm-ann/AGENTS.md).
+Deploying? See [STAGING.md](STAGING.md).
+
 ## DARM-ANN at a glance
 
 The blockchain *is* the long-term memory. DARM-ANN layers fast/ephemeral and

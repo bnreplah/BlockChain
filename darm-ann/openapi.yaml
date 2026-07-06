@@ -9,7 +9,7 @@ info:
     require an `operator`-scope token. `/darm/health`, `/darm/ready`,
     `/darm/version`, `/darm/metrics`, `/darm/alerts`, `/darm/monitor`, and
     `/darm/dashboard` are always open.
-  version: "6.0"
+  version: "7.2"
   license:
     name: CC BY 4.0
 servers:
@@ -24,6 +24,7 @@ tags:
   - name: security
   - name: cluster
   - name: agents
+  - name: fabric
 components:
   securitySchemes:
     bearerAuth:
@@ -308,3 +309,47 @@ paths:
       summary: Ordered fallback chain for a capability (cheapest tier first)
       parameters: [{ name: capability, in: query, required: true, schema: { type: string } }]
       responses: { "200": { description: Escalation chain } }
+  /fabric/state:
+    get:
+      tags: [fabric]
+      summary: This ACS's fabric state (identity, role, RIB/CCIL/SAL stats)
+      responses: { "200": { description: Fabric state } }
+  /fabric/advertise:
+    post:
+      tags: [fabric]
+      summary: Sign + publish a capability advertisement (operator)
+      responses: { "200": { description: Signed advertisement } }
+  /fabric/gossip:
+    post:
+      tags: [fabric]
+      summary: Ingest a peer's signed ADVERTISE/WITHDRAW into the RIB (operator)
+      responses: { "200": { description: Ingested } }
+  /fabric/peer:
+    post:
+      tags: [fabric]
+      summary: Add a bidirectional peering edge to another ACSN (operator)
+      responses: { "200": { description: Peered } }
+  /fabric/route:
+    post:
+      tags: [fabric]
+      summary: DIRP-1 path selection (trust-pruned Dijkstra) for a capability match
+      responses: { "200": { description: Routing decision } }
+  /fabric/job:
+    post:
+      tags: [fabric]
+      summary: Run a job end-to-end ROUTE→execute→ATTEST→SETTLE (operator)
+      responses: { "200": { description: Job receipt chain }, "400": { description: No route } }
+  /fabric/rails:
+    get:
+      tags: [fabric]
+      summary: List registered settlement rails
+      responses: { "200": { description: Rails } }
+    post:
+      tags: [fabric]
+      summary: Register a settlement Rail Profile (operator)
+      responses: { "200": { description: Registered } }
+  /fabric/adapters:
+    post:
+      tags: [fabric]
+      summary: Register a SAL Adapter ACS wrapping an external backend (operator)
+      responses: { "200": { description: Registered } }

@@ -38,7 +38,7 @@ function info() {
   cached = {
     name: 'darm-ann',
     version,
-    paperVersion: '6.0',
+    paperVersion: '7.2',
     commit: g.commit || 'unknown',
     branch: g.branch || 'unknown',
     builtAt: g.builtAt || null,

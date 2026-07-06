@@ -31,6 +31,16 @@ jobs:
         run: timeout 60 node darm-ann/chaos.js 7 21000 12000
       - name: Chaos — network partition (no progress, then recovery)
         run: timeout 50 node darm-ann/chaos.js 6 21500 --partition
+      - name: v7.2 fabric — Phase-1 two-ACS peering demo (DIRP-1 lifecycle)
+        run: node darm-ann/fabricDemo.js
+      - name: Vendor-name grep test (normative core is substrate-agnostic, v7.2 §9.2)
+        run: |
+          # Normative fabric modules must not name any vendor/network/product
+          # (Appendix M is the only place those belong). Fails the build if any appear.
+          if grep -rniE 'bittensor|io\.net|akash|render|gensyn|petals|tailscale|headscale|solana|ethereum|x402|phala|nillion|arcium|octra|stripe|\baws\b' darm-ann/fabric/; then
+            echo "vendor name found in normative fabric core"; exit 1;
+          fi
+          echo "fabric core is vendor-neutral"
       - name: Validate OpenAPI spec parses
         run: python3 -c "import yaml; d=yaml.safe_load(open('darm-ann/openapi.yaml')); assert d['openapi'].startswith('3'); print(len(d['paths']),'paths')"
       - name: Throughput benchmark + performance-regression gate
@@ -118,6 +128,15 @@ jobs:
           T2=$(curl -sf -H "$AUTH" "http://localhost:3001/agents/route?capability=teach" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).agent.tier))")
           echo "teach→ $T2"; test "$T2" = "knowledgeable"
           curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_agents{tier="narrow"} 1' && echo "agent metrics ok"
+      - name: v7.2 fabric — ACS state, rail registry, and DIRP-1 job
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          # node advertises itself as an ACS; register a settlement rail
+          ROLE=$(curl -sf -H "$AUTH" http://localhost:3001/fabric/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).role))")
+          echo "ACS role: $ROLE"
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"finality_bound":5000,"proof_format":"merkle","escrow_primitive":"htlc","dispute_hook":"arb","denomination":"credit"}' http://localhost:3001/fabric/rails >/dev/null
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_fabric_settlement_live 1' && echo "fabric settlement live"
       - name: Tear down
         if: always()
         run: docker rm -f darm || true
@@ -234,7 +253,7 @@ jobs:
           # is exercised by the smoke steps above, so here we run a focused check.
           curl -sf http://localhost:3001/darm/docs >/dev/null && echo "swagger docs served"
           curl -sf http://localhost:3001/darm/openapi.yaml | grep -q "openapi: 3" && echo "openapi spec served"
-          curl -sf http://localhost:3001/darm/version | grep -q '"paperVersion":"6.0"' && echo "version ok"
+          curl -sf http://localhost:3001/darm/version | grep -q '"paperVersion":"7.2"' && echo "version ok"
           kill $PF3 || true
       - name: Dump diagnostics on failure
         if: failure()

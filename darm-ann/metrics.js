@@ -55,6 +55,20 @@ function render(darm, extra = {}) {
     }
     out += line('darm_agents_online', 'Agents currently online (heartbeat fresh)', 'gauge', a.online || 0);
   }
+  if (extra.fabric) {
+    const f = extra.fabric;
+    out += line('darm_fabric_advertisements', 'Active capability advertisements by this ACS', 'gauge', f.advertisements || 0);
+    out += line('darm_fabric_rib_acs', 'ACS entries known in the routing information base', 'gauge', (f.rib && f.rib.acsCount) || 0);
+    out += line('darm_fabric_rib_peering_edges', 'Peering edges in the RIB graph', 'gauge', (f.rib && f.rib.peeringEdges) || 0);
+    out += line('darm_fabric_sal_adapters', 'Registered SAL adapter ACSs', 'gauge', (f.sal && f.sal.adapters) || 0);
+    out += line('darm_fabric_sal_rails', 'Registered settlement rails', 'gauge', (f.sal && f.sal.rails) || 0);
+    out += line('darm_fabric_settlement_live', 'Settlement plane live (>=1 rail) [P82]', 'gauge', (f.sal && f.sal.settlementLive) ? 1 : 0);
+    out += line('darm_fabric_attestations', 'ATTEST receipts issued', 'counter', f.attestations || 0);
+    if (f.ccil && f.ccil.byRole) {
+      out += `# HELP darm_fabric_ccil_role CCIL members by role\n# TYPE darm_fabric_ccil_role gauge\n`;
+      for (const role of ['LEAF', 'RELAY', 'ANCHOR', 'VALIDATOR']) out += `darm_fabric_ccil_role{role="${role}"} ${(f.ccil.byRole[role]) || 0}\n`;
+    }
+  }
   return out;
 }
 

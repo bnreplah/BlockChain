@@ -35,7 +35,7 @@ const darmRateLimiter = new RateLimiter({ capacity: DARM_RL_CAP, refillPerSec: D
 const darmAudit = new AuditLog({ file: process.env.DARM_AUDIT_FILE || null, max: 2000 });
 function tokenOf(req){ const h = req.headers['authorization'] || ''; return h.startsWith('Bearer ') ? h.slice(7) : (req.headers['x-darm-token'] || ''); }
 app.use((req, res, next)=>{
-    if (!req.path.startsWith('/darm/') && !req.path.startsWith('/agents/')) return next(); // guard DARM + agent APIs
+    if (!req.path.startsWith('/darm/') && !req.path.startsWith('/agents/') && !req.path.startsWith('/fabric/')) return next(); // guard DARM + agent + fabric APIs
     if (DARM_OPEN_PATHS.has(req.path)) return next();  // probes/scrape/alerts exempt
     const token = tokenOf(req);
     // Auth (RBAC) — skipped entirely when no tokens configured.
@@ -142,6 +142,25 @@ const darmAgentRouter = new AgentRouter(darmAgents);
 // Reap stale agents periodically so the registry reflects who is actually online.
 const darmAgentReaper = setInterval(() => darmAgents.reapStale(), 30000);
 if (darmAgentReaper.unref) darmAgentReaper.unref();
+
+// ── DARM-ANN v7.2 Distributed AI Lens: this node IS an Autonomous Cognitive
+// System (ACS). The Fabric layer advertises capabilities, routes jobs between
+// subnets via DIRP-1 (trust-pruned Dijkstra), and runs the CCIL/SAL/privacy
+// planes. ACS identity is deterministic from the node's cluster identity so a
+// restart keeps the same ACSN.
+const Fabric = require('./darm-ann/fabric');
+const ValidatorKey = require('./darm-ann/consensus/validatorKey');
+const fabricSeed = require('crypto').createHash('sha256').update('darm-acs|' + (process.env.NODE_URL || currentNodeUrl || n0deAddress)).digest();
+const fabric = new Fabric({ key: ValidatorKey.fromSeed(fabricSeed), name: process.env.ACS_NAME || ('acs-' + n0deAddress.slice(0, 8)),
+    ccil: { stake: Number(process.env.ACS_STAKE || 500), uptime: 1, bvas: 0.9 } });
+// Advertise this node's own memory/inference capability so peers can route to it.
+fabric.advertise({
+    model_classes: ['tinylm', 'slm'], memory_domains: ['ltm', 'rrc'], gpu_tiers: ['edge'],
+    latency_class: Number(process.env.ACS_LATENCY || 5), trust_score: 0.9,
+    price_curve: Number(process.env.ACS_PRICE || 1), sync_classes: ['async', 'block'], conf_classes: ['redact', 'attested'],
+});
+fabric.ccil.reconcile(fabric.acsn); // elevate to the role its stake/uptime/bvas earns
+console.log("[DARM-ANN] ACS online ->", fabric.acsn, "role", fabric.ccil.role(fabric.acsn));
 
 // Periodic durable snapshot to the persistent volume (production deploy). The
 // interval (ms) is DARM_SNAPSHOT_MS; 0 disables. Default 60s when a path is set.
@@ -404,6 +423,60 @@ app.get("/agents/escalation", (req, res)=>{
     res.json({ capability: cap, chain: darmAgentRouter.escalationChain(cap) });
 });
 
+// ************************************************************************
+// DIRP-1 fabric: Autonomous Cognitive System (ACS) inter-network routing
+// (DARM-ANN v7.2 Distributed AI Lens — Parts II-IV)
+// ************************************************************************
+
+// state: this ACS's fabric state (identity, role, RIB/CCIL/SAL stats) [read]
+app.get("/fabric/state", (req, res)=>{ res.json(fabric.state()); });
+
+// advertise: sign + publish a capability advertisement (operator)
+app.post("/fabric/advertise", (req, res)=>{
+    try { res.json(fabric.advertise(req.body.capability || req.body, { ttlMs: req.body.ttlMs })); }
+    catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// gossip: ingest a peer's signed ADVERTISE/WITHDRAW into the RIB (operator)
+app.post("/fabric/gossip", (req, res)=>{
+    const rec = req.body.record || req.body;
+    res.json(fabric.gossipIn(rec, { peerAcsn: req.body.peerAcsn || null }));
+});
+
+// peer: add a bidirectional peering edge to another ACSN (operator)
+app.post("/fabric/peer", (req, res)=>{
+    if (!req.body.acsn) return res.status(400).json({ error: "acsn required" });
+    fabric.peerWith(req.body.acsn);
+    res.json({ ok: true, peers: fabric.rib.neighbours(fabric.acsn).length });
+});
+
+// route: DIRP-1 path selection for a capability match (read). Body: { match, privacy_mode, sync_class, conf_class }
+app.post("/fabric/route", (req, res)=>{
+    const b = req.body || {};
+    const match = b.model_class ? (c)=> Array.isArray(c.model_classes) && c.model_classes.includes(b.model_class) : ()=>true;
+    res.json(fabric.route({ match, privacy_mode: b.privacy_mode, sync_class: b.sync_class, conf_class: b.conf_class, beta: b.beta, trustFloor: b.trustFloor }));
+});
+
+// job: run a job end-to-end ROUTE->execute->ATTEST->SETTLE (operator)
+app.post("/fabric/job", async (req, res)=>{
+    const b = req.body || {};
+    const match = b.model_class ? (c)=> Array.isArray(c.model_classes) && c.model_classes.includes(b.model_class) : ()=>true;
+    const out = await fabric.runJob({ payload: b.payload, budget: b.budget || 0 }, { match, privacy_mode: b.privacy_mode, sync_class: b.sync_class, conf_class: b.conf_class });
+    res.status(out.ok ? 200 : 400).json(out);
+});
+
+// rails: register a settlement Rail Profile (operator) / list (read)
+app.post("/fabric/rails", (req, res)=>{ res.json(fabric.sal.registerRail(req.body || {})); });
+app.get("/fabric/rails", (req, res)=>{ res.json({ rails: fabric.sal.rails(), settlementLive: fabric.sal.settlementLive() }); });
+
+// adapters: register a SAL Adapter ACS (operator) — any external backend
+app.post("/fabric/adapters", (req, res)=>{
+    try {
+        const a = new Fabric.SAL.AdapterACS(req.body || {});
+        res.json(fabric.sal.registerAdapter(a));
+    } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // navigate: model-directed traversal of the Markov chain-graph (TinyLM-steered)
 app.get("/darm/navigate", (req, res)=>{
     res.json(darm.navigate(req.query.q || "", Number(req.query.steps) || 8));
@@ -614,6 +687,7 @@ app.get("/darm/metrics", (req, res)=>{
         tasks: darmTasks.summary(),
         buildInfo: darmVersion.info(),
         agents: darmAgents.stats(),
+        fabric: fabric.state(),
     });
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(text);

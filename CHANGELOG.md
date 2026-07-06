@@ -3,6 +3,42 @@
 All notable changes to the DARM-ANN implementation in this repository.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [7.2] — Distributed AI Lens (substrate-agnostic fabric)
+
+Implements the DARM-ANN v7.2 whitepaper: each deployment becomes an **Autonomous
+Cognitive System (ACS)** that routes jobs between subnets. `paperVersion` bumped
+6.0 → 7.2; OpenAPI `version` 7.2 (39 paths, `fabric` tag).
+
+- **ACS identity + capability advertisements** (`fabric/acs.js`, Part II §2.2):
+  Ed25519 identity = ACSN; signed, TTL-scoped ADVERTISE/WITHDRAW; peering policy.
+- **Routing Information Base** (`fabric/rib.js`, §2.3): verified advertisements +
+  peering graph; no directory authority.
+- **DIRP-1 routing** (`fabric/dirp.js`, §2.4): **trust-pruned Dijkstra over the
+  RIB graph** (the GTE's shortest-path primitive over a different graph) with
+  ACS-path loop prevention. Implements P63, P64, P81 as testable code.
+- **Privacy plane** (`fabric/privacy.js`, Part III): confidential-execution
+  ladder (`redact`/`attested`/`blind`/`sealed`) + `privacy_mode` + real onion
+  routing (X25519 per-hop, ≥3 relays, size-class padding) — P65. Rung-0
+  redaction mandatory in onion mode.
+- **CCIL** (`fabric/ccil.js`, Part IV): role ladder LEAF→RELAY→ANCHOR→VALIDATOR
+  with stake-weighted validator sortition + slashing; PoUI (redundant
+  spot-execution, TinyLM-verifier hook) with P67/P68 economics as code.
+- **SAL** (`fabric/sal.js`, §4.4/§4.6): five provider classes (CSP/SRP/CEP/MRP/
+  TAP) with conformance profiles + Adapter ACS (P79/P80), and the Rail Profile
+  Registry (rail-agnostic SETTLE, P82).
+- **Fabric facade + endpoints**: full `ADVERTISE→ROUTE→execute→ATTEST→SETTLE`
+  lifecycle; `/fabric/{state,advertise,gossip,peer,route,job,rails,adapters}`;
+  `darm_fabric_*` metrics.
+- **Phase-1 demo** (`darm-ann/fabricDemo.js`, `npm run darm:fabric`): the
+  roadmap §9.1 exit gate — a cross-ACS job with a verifiable receipt + settlement.
+- **Substrate-agnostic core**: fabric modules name no vendor/network/product; a
+  CI grep test enforces it (v7.2 §9.2). Docs in `darm-ann/FABRIC.md`.
+- **Staging**: `deploy/helm/*/values-staging.yaml`, `STAGING.md` (managed-k8s
+  runbook), `.env.example`. CI adds the fabric demo, fabric HTTP smoke, and the
+  vendor-name grep test.
+- Tests: +30 unit (acs/dirp/privacy/ccil/sal + end-to-end) and a fabric
+  integration test. 115 unit + 12 integration green.
+
 ## [Unreleased]
 
 ### Added — agentic layer
