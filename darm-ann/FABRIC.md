@@ -19,7 +19,8 @@ modules name no network, cloud, chain, or product — a CI grep test enforces it
 | `fabric/privacy.js` | Part III | Confidential-execution ladder (`redact`/`attested`/`blind`/`sealed`) + onion routing (≥3 relays) |
 | `fabric/ccil.js` | Part IV | CCIL role ladder (LEAF→RELAY→ANCHOR→VALIDATOR) + PoUI (spot-check, incentive math) |
 | `fabric/sal.js` | §4.4, §4.6 | Substrate Abstraction Layer provider classes (CSP/SRP/CEP/MRP/TAP) + Rail Profile Registry |
-| `fabric/index.js` | Parts II–IV | `Fabric` facade — the full `ADVERTISE→ROUTE→execute→ATTEST→SETTLE` lifecycle |
+| `fabric/memoryFederation.js` | §2.1 | **Blockchains as the memory fabric** — each node's LTM blockchain is a federated memory shard answering DIRP-1 QUERY; global-chain checkpoints |
+| `fabric/index.js` | Parts II–IV | `Fabric` facade — the full `ADVERTISE→ROUTE→execute→ATTEST→SETTLE` lifecycle + memory federation + autonomous breathing |
 
 ## The core payoff: routing = memory traversal
 
@@ -41,16 +42,47 @@ Proof obligations implemented as **testable code + assertions**:
 - **P81** — neutrality: `cost(path)` uses only advertised/measured/attested properties.
 - **P82** — settlement survives while ≥1 conforming rail is registered.
 
+## Memory fabric: blockchains as shared memory across nodes (§2.1)
+
+The v7.2 memory hierarchy maps directly onto the fabric: **WM→route state,
+EB→exchange cache, STM→branch ledger, LTM→global-chain checkpoints, RRC→
+cross-subnet memory federation via DIRP-1 QUERY.** `fabric/memoryFederation.js`
+makes each node's **real LTM blockchain a federated memory shard**:
+
+- `answerQuery(text)` — a DIRP-1 QUERY against this ACS's LTM chain; returns the
+  matching claim, its **block hash**, similarity, and a
+  `score = similarity · trust · confidence`.
+- `federatedQuery(text, {peerAnswers})` — aggregates shard answers from peers and
+  returns the best-scoring recall, naming the ACS and block it came from. A fact
+  committed to one node's chain is recallable network-wide — the chains *are* the
+  memory.
+- `checkpointMemory()` — a verifiable global-chain checkpoint of the LTM head
+  (`root = H(acsn | head | height)`); `MemoryFederation.verifyCheckpoint(cp)`.
+
+## Autonomous breathing: self-correcting, self-routing (§2.1 heartbeat)
+
+`fabric.breathe()` is one autonomous tick that keeps a node coherent without an
+operator: it **re-advertises** its TTL-scoped capabilities (self-routing),
+**reconciles its CCIL role** to what it has earned (self-correcting), and
+**checkpoints its memory shard**. `startBreathing({intervalMs})` runs it on a
+heartbeat (`ACS_BREATHE_MS`, default 60 s); `stopBreathing()` halts it on
+shutdown. This is the abstracted, self-corrected loop that lets the fabric run as
+a living distributed system rather than a statically-configured one.
+
 ## HTTP API (`/fabric/*`)
 
 `GET /fabric/state` · `POST /fabric/advertise` · `POST /fabric/gossip` ·
 `POST /fabric/peer` · `POST /fabric/route` · `POST /fabric/job` ·
+`GET /fabric/query` · `POST /fabric/federated-query` ·
+`POST /fabric/checkpoint` · `POST /fabric/breathe` ·
 `GET|POST /fabric/rails` · `POST /fabric/adapters`.
 
 Metrics: `darm_fabric_advertisements`, `darm_fabric_rib_acs`,
 `darm_fabric_rib_peering_edges`, `darm_fabric_sal_adapters`,
 `darm_fabric_sal_rails`, `darm_fabric_settlement_live`,
-`darm_fabric_attestations`, `darm_fabric_ccil_role{role}`.
+`darm_fabric_attestations`, `darm_fabric_ccil_role{role}`,
+`darm_fabric_breathing`, `darm_fabric_memory_height`,
+`darm_fabric_memory_valid`, `darm_fabric_memory_checkpoints`.
 
 ## Phase-1 demo (the next stage of testing)
 

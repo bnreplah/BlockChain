@@ -339,6 +339,27 @@ paths:
       tags: [fabric]
       summary: Run a job end-to-end ROUTE→execute→ATTEST→SETTLE (operator)
       responses: { "200": { description: Job receipt chain }, "400": { description: No route } }
+  /fabric/query:
+    get:
+      tags: [fabric]
+      summary: DIRP-1 QUERY this ACS's LTM blockchain memory shard (§2.1)
+      parameters: [{ name: q, in: query, required: true, schema: { type: string } }, { name: threshold, in: query, required: false, schema: { type: number } }]
+      responses: { "200": { description: Local memory-shard answer (hit, claim, blockHash, similarity, score) } }
+  /fabric/federated-query:
+    post:
+      tags: [fabric]
+      summary: Aggregate peer memory-shard answers and return the best-scoring recall (operator)
+      responses: { "200": { description: Federated recall across LTM blockchains (fromAcs, blockHash, sources) } }
+  /fabric/checkpoint:
+    post:
+      tags: [fabric]
+      summary: Global-chain checkpoint of this ACS's LTM memory blockchain head (operator)
+      responses: { "200": { description: Verifiable checkpoint (height, head, root) } }
+  /fabric/breathe:
+    post:
+      tags: [fabric]
+      summary: Autonomous breathing tick — re-advertise, reconcile CCIL role, checkpoint memory (operator)
+      responses: { "200": { description: Breath result (reAdvertised, roleEvent, checkpoint, memoryValid) } }
   /fabric/rails:
     get:
       tags: [fabric]

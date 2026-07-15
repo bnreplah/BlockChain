@@ -7,6 +7,7 @@ const dirp = require('./dirp');
 const privacy = require('./privacy');
 const CCIL = require('./ccil');
 const SAL = require('./sal');
+const MemoryFederation = require('./memoryFederation');
 const ValidatorKey = require('../consensus/validatorKey');
 
 /**
@@ -24,7 +25,7 @@ const ValidatorKey = require('../consensus/validatorKey');
  * two-ACS peering artifact the v7.2 roadmap (§9.1) names as the next stage.
  */
 class Fabric {
-  constructor({ key = null, name = null, peering = {}, ccil = {}, executor = null } = {}) {
+  constructor({ key = null, name = null, peering = {}, ccil = {}, executor = null, ltmProvider = null, embed = null } = {}) {
     this.acs = new ACS({ key: key || new ValidatorKey(), name, peering });
     this.rib = new RIB();
     this.ccil = new CCIL(ccil);
@@ -34,6 +35,11 @@ class Fabric {
     this.executor = executor || ((job) => ({ ok: true, echo: job.payload, at: Date.now() }));
     this.attestations = []; // signed ATTEST receipts we issued
     this.settlements = []; // SETTLE records we validated
+    // Memory federation: this node's LTM BLOCKCHAIN is a shard of the fabric's
+    // federated memory (§2.1). ltmProvider/embed injected from the running node;
+    // when absent the fabric still routes/settles but answers no memory queries.
+    this.memory = ltmProvider ? new MemoryFederation({ acsn: this.acs.acsn, ltmProvider, embed, trustScore: 0.9 }) : null;
+    this._breathTimers = null;
     // Self-advertisement into own RIB so single-node routing/tests work.
     this.rib.addPeering(this.acs.acsn, this.acs.acsn);
   }
@@ -96,6 +102,31 @@ class Fabric {
     if (!pv.ok) return { ok: false, reason: pv.reason };
     const header = dirp.buildRouteHeader({ job_class: 'inference', privacy_mode, sync_class, conf_class, acsPath: [this.acsn] });
     return { ...sel, header };
+  }
+
+  // ── DIRP-1 QUERY: cross-subnet memory federation (§2.1/§2.4, RRC tier) ─────
+
+  /** Answer a QUERY from THIS node's LTM blockchain shard. */
+  answerQuery(queryText, opts) {
+    if (!this.memory) return { acsn: this.acsn, hit: false, reason: 'no LTM bound' };
+    return this.memory.answerLocal(queryText, opts);
+  }
+
+  /**
+   * Federated QUERY: gather local + peer shard answers into one result.
+   * `peerAnswers` are answerLocal-shaped records collected via GOSSIP/DIRP from
+   * peers; the aggregator ranks by (similarity·trust·confidence) so the
+   * fabric's collective memory — not one node's — answers. This is the
+   * "blockchains as the memory fabric" primitive.
+   */
+  federatedQuery(queryText, { peerAnswers = [], threshold = 0.6 } = {}) {
+    const local = this.answerQuery(queryText, { threshold });
+    return MemoryFederation.aggregate(queryText, [local, ...peerAnswers]);
+  }
+
+  /** Take a global-chain checkpoint of our LTM head (§2.1 LTM→checkpoints). */
+  checkpointMemory() {
+    return this.memory ? this.memory.checkpoint() : null;
   }
 
   // ── Full lifecycle: ROUTE → execute → ATTEST → SETTLE ─────────────────────
@@ -161,6 +192,54 @@ class Fabric {
     return record;
   }
 
+  // ── Autonomous "breathing": self-correct + self-route + checkpoint ────────
+
+  /**
+   * One breath (idempotent, safe to call on a timer). The self-correcting,
+   * self-routing heartbeat of an ACS:
+   *   • re-advertise so TTL-scoped capability prefixes never lapse,
+   *   • reconcile CCIL role from current stake/uptime/bvas (self-elevation/demotion),
+   *   • checkpoint the LTM memory blockchain (federation root),
+   *   • report memory-chain validity so the caller can trigger LTM self-repair.
+   * `refreshCapability` optionally supplies fresh advertisement content.
+   */
+  breathe({ refreshCapability = null } = {}) {
+    const report = { at: Date.now(), reAdvertised: 0, roleEvent: null, checkpoint: null, memoryValid: true };
+    // Keep advertisements alive (TTL-scoped, §2.4). Re-sign current ones.
+    for (const ad of this.acs.activeAdvertisements()) {
+      const cap = refreshCapability || ad.capability;
+      this.advertise(cap, {});
+      report.reAdvertised += 1;
+    }
+    if (report.reAdvertised === 0 && refreshCapability) { this.advertise(refreshCapability, {}); report.reAdvertised = 1; }
+    // Self-elevate/demote based on measured contribution.
+    report.roleEvent = this.ccil.reconcile(this.acsn);
+    // Checkpoint the memory blockchain shard.
+    if (this.memory) {
+      const cp = this.checkpointMemory();
+      report.checkpoint = cp ? { height: cp.height, head: cp.head.slice(0, 12), valid: cp.valid } : null;
+      report.memoryValid = cp ? cp.valid : true;
+    }
+    return report;
+  }
+
+  /** Start the breathing loop on a timer (autonomous operation). Returns this. */
+  startBreathing({ intervalMs = 60000, refreshCapability = null, onBreath = null } = {}) {
+    this.stopBreathing();
+    this._breathTimers = [setInterval(() => {
+      const r = this.breathe({ refreshCapability });
+      if (onBreath) try { onBreath(r); } catch (_e) {}
+    }, intervalMs)];
+    for (const t of this._breathTimers) if (t.unref) t.unref();
+    return this;
+  }
+
+  stopBreathing() {
+    if (this._breathTimers) for (const t of this._breathTimers) clearInterval(t);
+    this._breathTimers = null;
+    return this;
+  }
+
   // ── State / metrics ───────────────────────────────────────────────────────
 
   state() {
@@ -172,6 +251,8 @@ class Fabric {
       rib: this.rib.stats(),
       ccil: this.ccil.stats(),
       sal: this.sal.stats(),
+      memory: this.memory ? this.memory.stats() : null,
+      breathing: !!this._breathTimers,
       attestations: this.attestations.length,
       settlements: this.settlements.length,
     };
@@ -187,4 +268,5 @@ Fabric.dirp = dirp;
 Fabric.privacy = privacy;
 Fabric.CCIL = CCIL;
 Fabric.SAL = SAL;
+Fabric.MemoryFederation = MemoryFederation;
 module.exports = Fabric;

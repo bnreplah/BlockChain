@@ -17,14 +17,19 @@
 
 const crypto = require('crypto');
 const Fabric = require('./fabric');
+const LongTermMemory = require('./memory/longTermMemory');
+const { embed } = require('./util/embedding');
 
 const line = (s = '') => console.log(s);
 const rule = (t) => line(`\n──────── ${t} ────────`);
 
 (async () => {
   rule('1. Two ACSs come online (Ed25519 identity = ACSN)');
-  const A = Fabric.fromSeed(crypto.createHash('sha256').update('demo-A').digest(), { name: 'acs-A', ccil: { stake: 600, uptime: 1, bvas: 0.9 } });
-  const B = Fabric.fromSeed(crypto.createHash('sha256').update('demo-B').digest(), { name: 'acs-B', ccil: { stake: 800, uptime: 0.995, bvas: 0.92 } });
+  // Each ACS carries its own LONG-TERM MEMORY BLOCKCHAIN — the memory fabric.
+  const ltmA = new LongTermMemory({ dim: 64 });
+  const ltmB = new LongTermMemory({ dim: 64 });
+  const A = Fabric.fromSeed(crypto.createHash('sha256').update('demo-A').digest(), { name: 'acs-A', ccil: { stake: 600, uptime: 1, bvas: 0.9 }, ltmProvider: () => ltmA, embed: (t) => embed(t, 64) });
+  const B = Fabric.fromSeed(crypto.createHash('sha256').update('demo-B').digest(), { name: 'acs-B', ccil: { stake: 800, uptime: 0.995, bvas: 0.92 }, ltmProvider: () => ltmB, embed: (t) => embed(t, 64) });
   A.ccil.reconcile(A.acsn); B.ccil.reconcile(B.acsn);
   line(`A ${A.acsn.slice(0, 12)} role=${A.ccil.role(A.acsn)}`);
   line(`B ${B.acsn.slice(0, 12)} role=${B.ccil.role(B.acsn)}`);
@@ -53,7 +58,25 @@ const rule = (t) => line(`\n──────── ${t} ───────�
   line(`ATTEST receipt verifies (P80 accountability): ${Fabric.verifyAttest(res.attest)}`);
   line(`SETTLE valid on ${res.settle.rail_id}: ${res.settle.valid}`);
 
-  rule('5. Privacy plane — onion routing over 3 relays (P65)');
+  rule('5. Memory fabric — blockchains federate memory across nodes (§2.1)');
+  const fact = 'the mitochondria is the powerhouse of the cell';
+  // B consolidates the fact onto ITS OWN LTM blockchain.
+  ltmB.commit({ claim_text: fact, embedding: embed(fact, 64), confidence: 0.92, salience: 0.7, consensus_votes: [], proposer: 'B', validation: {} });
+  line(`B LTM blockchain: height ${ltmB.size}, valid ${ltmB.validate().valid}`);
+  // A issues a DIRP-1 QUERY. A's shard misses; B's blockchain shard answers.
+  const aShard = A.answerQuery(fact);
+  const bShard = B.answerQuery(fact);
+  line(`A shard hit: ${aShard.hit} | B shard hit: ${bShard.hit} (similarity ${(bShard.similarity || 0).toFixed(3)})`);
+  const fed = A.federatedQuery(fact, { peerAnswers: [bShard] });
+  line(`federated recall → answer from ${fed.fromAcs === B.acsn ? 'B\'s blockchain' : fed.fromAcs}, claim matches: ${fed.claim === fact}`);
+  // Global-chain checkpoint of the memory shard (LTM → checkpoints, §2.1).
+  const cp = B.checkpointMemory();
+  line(`B memory checkpoint: height ${cp.height}, head ${cp.head.slice(0, 12)}, verifies ${Fabric.MemoryFederation.verifyCheckpoint(cp)}`);
+  // Autonomous breathing: self-reconcile role + re-advertise + checkpoint.
+  const breath = B.breathe({ refreshCapability: { model_classes: ['tinylm'], trust_score: 0.9 } });
+  line(`B breathes: re-advertised ${breath.reAdvertised}, memory valid ${breath.memoryValid}, checkpoint ${!!breath.checkpoint}`);
+
+  rule('6. Privacy plane — onion routing over 3 relays (P65)');
   const priv = Fabric.privacy;
   const relays = [priv.newRelayIdentity(), priv.newRelayIdentity(), priv.newRelayIdentity()].map((r, i) => ({ acsn: `relay-${i}`, publicKeyRaw: r.publicKeyRaw, priv: r.privateKey }));
   const { onion, ephemerals } = priv.buildOnion('confidential prompt for user@x.com', relays);
@@ -62,12 +85,12 @@ const rule = (t) => line(`\n──────── ${t} ───────�
   line(`onion delivered to exit: "${delivered}" (exit never sees raw identifiers)`);
   line(`<3 relays rejected: ${!priv.validate({ privacy_mode: 'onion', conf_class: 'redact', hops: 2 }).ok}`);
 
-  rule('6. SAL — a hyperscale cloud joins as an Adapter ACS (P79 neutrality)');
+  rule('7. SAL — a hyperscale cloud joins as an Adapter ACS (P79 neutrality)');
   const cloud = new Fabric.SAL.AdapterACS({ acsn: 'adapter-cloud-1', providerClass: 'CSP', backend: 'any-cloud-region', stake: 5000, profile: { sync_classes: ['async', 'tight'], conf_classes: ['attested'], price_curve: 3, attest: true } });
   const reg = A.sal.registerAdapter(cloud);
   line(`cloud adapter conforms + registered as CSP: ${reg.ok} (fabric cannot tell it from a bedroom GPU — that IS the neutrality property)`);
 
-  rule('7. CCIL economics — PoUI soundness + incentive compatibility');
+  rule('8. CCIL economics — PoUI soundness + incentive compatibility');
   line(`P67 undetected fraud over 20 spot-checked jobs (q=${A.ccil.q}): ${A.ccil.undetectedFraudProbability(20).toExponential(2)}`);
   line(`P68 min stake so honesty dominates at cheat-gain 100: ${A.ccil.minStakeForIncentiveCompatibility(100).toFixed(1)}`);
   line(`B (stake 800) incentive-compatible vs gain 100: ${A.ccil.isIncentiveCompatible(B.acsn, 100)}`);

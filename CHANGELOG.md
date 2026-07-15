@@ -27,17 +27,34 @@ Cognitive System (ACS)** that routes jobs between subnets. `paperVersion` bumped
   TAP) with conformance profiles + Adapter ACS (P79/P80), and the Rail Profile
   Registry (rail-agnostic SETTLE, P82).
 - **Fabric facade + endpoints**: full `ADVERTISE→ROUTE→execute→ATTEST→SETTLE`
-  lifecycle; `/fabric/{state,advertise,gossip,peer,route,job,rails,adapters}`;
+  lifecycle; `/fabric/{state,advertise,gossip,peer,route,job,query,federated-query,checkpoint,breathe,rails,adapters}`;
   `darm_fabric_*` metrics.
+- **Memory fabric — blockchains as shared memory across nodes** (`fabric/
+  memoryFederation.js`, §2.1): each node's **real LTM blockchain becomes a
+  federated memory shard**. `answerQuery` runs a DIRP-1 QUERY against the LTM
+  chain (returns the claim + its block hash + similarity·trust·confidence score);
+  `federatedQuery` aggregates peer shards so a fact committed to one node's chain
+  is recallable network-wide; `checkpointMemory` takes a verifiable global-chain
+  checkpoint of the LTM head. LTM→checkpoints, RRC→cross-subnet federation.
+  Endpoints `GET /fabric/query`, `POST /fabric/{federated-query,checkpoint}`;
+  metrics `darm_fabric_memory_{height,valid,checkpoints}`.
+- **Autonomous breathing — self-correcting, self-routing** (`fabric.breathe`/
+  `startBreathing`/`stopBreathing`): a heartbeat tick (`ACS_BREATHE_MS`, default
+  60 s) that re-advertises TTL-scoped capabilities (self-routing), reconciles the
+  CCIL role to what was earned (self-correcting), and checkpoints the memory
+  shard. Endpoint `POST /fabric/breathe`; metric `darm_fabric_breathing`.
 - **Phase-1 demo** (`darm-ann/fabricDemo.js`, `npm run darm:fabric`): the
-  roadmap §9.1 exit gate — a cross-ACS job with a verifiable receipt + settlement.
+  roadmap §9.1 exit gate — a cross-ACS job with a verifiable receipt + settlement,
+  plus the memory-fabric section (a fact committed to ACS-B's blockchain is
+  recalled by ACS-A via federated QUERY) and an autonomous breath.
 - **Substrate-agnostic core**: fabric modules name no vendor/network/product; a
   CI grep test enforces it (v7.2 §9.2). Docs in `darm-ann/FABRIC.md`.
 - **Staging**: `deploy/helm/*/values-staging.yaml`, `STAGING.md` (managed-k8s
   runbook), `.env.example`. CI adds the fabric demo, fabric HTTP smoke, and the
   vendor-name grep test.
-- Tests: +30 unit (acs/dirp/privacy/ccil/sal + end-to-end) and a fabric
-  integration test. 115 unit + 12 integration green.
+- Tests: +33 unit (acs/dirp/privacy/ccil/sal + memory federation + end-to-end)
+  and 2 fabric integration tests (job lifecycle + memory federation). 118 unit +
+  13 integration green.
 
 ## [Unreleased]
 

@@ -68,6 +68,12 @@ function render(darm, extra = {}) {
       out += `# HELP darm_fabric_ccil_role CCIL members by role\n# TYPE darm_fabric_ccil_role gauge\n`;
       for (const role of ['LEAF', 'RELAY', 'ANCHOR', 'VALIDATOR']) out += `darm_fabric_ccil_role{role="${role}"} ${(f.ccil.byRole[role]) || 0}\n`;
     }
+    out += line('darm_fabric_breathing', 'Autonomous breathing loop active', 'gauge', f.breathing ? 1 : 0);
+    if (f.memory) {
+      out += line('darm_fabric_memory_height', 'Federated memory shard height (LTM blockchain)', 'gauge', f.memory.ltmHeight || 0);
+      out += line('darm_fabric_memory_valid', 'LTM memory blockchain valid', 'gauge', f.memory.ltmValid ? 1 : 0);
+      out += line('darm_fabric_memory_checkpoints', 'Global-chain checkpoints taken', 'counter', f.memory.checkpoints || 0);
+    }
   }
   return out;
 }

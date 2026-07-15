@@ -265,6 +265,32 @@ async function main() {
       const m = await req(PORT, 'GET', '/darm/metrics');
       assert.ok(/darm_fabric_advertisements \d+/.test(m.raw) && /darm_fabric_settlement_live 1/.test(m.raw));
     });
+
+    await test('v7.2 memory federation: LTM blockchain answers a DIRP-1 QUERY + checkpoint + breathe', async () => {
+      // Teach + consolidate a fact so it lands on the node's LTM blockchain.
+      const claim = 'the fabric federates memory across distributed nodes';
+      await req(PORT, 'POST', '/darm/teach', { token: TOKEN_OP, body: { claim } });
+      await req(PORT, 'POST', '/darm/observe', { token: TOKEN_OP, body: { claim, reward: 1, epistemic: { conf_cal: 0.92, u_ep: 0.05 } } });
+      await req(PORT, 'POST', '/darm/replay', { token: TOKEN_OP });
+
+      // DIRP-1 QUERY answers from this node's LTM blockchain shard.
+      const q = await req(PORT, 'GET', '/fabric/query?q=' + encodeURIComponent(claim), { token: TOKEN_RO });
+      assert.ok(q.body.hit && q.body.claim === claim && q.body.blockHash, 'shard answered from the LTM chain');
+
+      // Federated query with the local shard's answer as the only source.
+      const fed = await req(PORT, 'POST', '/fabric/federated-query', { token: TOKEN_OP, body: { q: claim, peerAnswers: [] } });
+      assert.ok(fed.body.hit && fed.body.claim === claim);
+
+      // Checkpoint the memory blockchain (global-chain root) + one breath.
+      const cp = await req(PORT, 'POST', '/fabric/checkpoint', { token: TOKEN_OP });
+      assert.ok(cp.body.head && cp.body.valid, 'checkpoint of the memory chain');
+      const br = await req(PORT, 'POST', '/fabric/breathe', { token: TOKEN_OP });
+      assert.ok(br.body.memoryValid, 'breath reports memory-chain validity');
+
+      // Memory-federation metrics present.
+      const m2 = await req(PORT, 'GET', '/darm/metrics');
+      assert.ok(/darm_fabric_memory_valid 1/.test(m2.raw) && /darm_fabric_memory_height \d+/.test(m2.raw));
+    });
   } finally {
     await stop(server);
     fs.rmSync(dataDir, { recursive: true, force: true });

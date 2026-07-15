@@ -1430,6 +1430,57 @@ section('fabric (end-to-end lifecycle)');
   });
 }
 
+section('fabric/memoryFederation (blockchains as the memory fabric)');
+{
+  const Fabric = require('./fabric');
+  const MemoryFederation = require('./fabric/memoryFederation');
+  const LongTermMemory = require('./memory/longTermMemory');
+  const { embed } = require('./util/embedding');
+  const crypto = require('crypto');
+
+  // Build an LTM blockchain with a committed memory (simulating consolidation).
+  function ltmWith(claim) {
+    const ltm = new LongTermMemory({ dim: 64 });
+    ltm.commit({ claim_text: claim, embedding: embed(claim, 64), confidence: 0.92, salience: 0.7, consensus_votes: [], proposer: 'x', validation: {} });
+    return ltm;
+  }
+
+  test('a node answers a QUERY from its own LTM blockchain shard', () => {
+    const claim = 'photosynthesis converts light to chemical energy';
+    const ltm = ltmWith(claim);
+    const fed = new MemoryFederation({ acsn: 'acs-1', ltmProvider: () => ltm, embed: (t) => embed(t, 64), trustScore: 0.9 });
+    const ans = fed.answerLocal(claim);
+    assert.ok(ans.hit && ans.claim === claim && ans.blockHash);
+    assert.ok(ans.score > 0 && ans.similarity > 0.9);
+    const miss = fed.answerLocal('utterly unrelated xylophone quasar');
+    assert.ok(!miss.hit);
+  });
+
+  test('federated QUERY picks the best shard across nodes (memory fabric)', () => {
+    const claim = 'the citric acid cycle occurs in the mitochondria';
+    // Node A has an empty LTM; node B holds the fact on its blockchain.
+    const A = new Fabric({ ltmProvider: () => new LongTermMemory({ dim: 64 }), embed: (t) => embed(t, 64) });
+    const bLtm = ltmWith(claim);
+    const B = new Fabric({ ltmProvider: () => bLtm, embed: (t) => embed(t, 64) });
+    const bAns = B.answerQuery(claim);
+    const fed = A.federatedQuery(claim, { peerAnswers: [bAns] });
+    assert.ok(fed.hit, 'federated hit across shards');
+    assert.strictEqual(fed.fromAcs, B.acsn, 'answer sourced from B blockchain');
+    assert.strictEqual(fed.claim, claim);
+  });
+
+  test('checkpoints bind head+height and verify; breathing re-advertises + checkpoints', () => {
+    const ltm = ltmWith('a durable fact');
+    const f = new Fabric({ ltmProvider: () => ltm, embed: (t) => embed(t, 64) });
+    f.advertise({ model_classes: ['tinylm'], trust_score: 0.9 });
+    const cp = f.checkpointMemory();
+    assert.ok(cp && cp.height === 1 && MemoryFederation.verifyCheckpoint(cp));
+    assert.ok(!MemoryFederation.verifyCheckpoint({ ...cp, head: 'tampered' }), 'tampered checkpoint rejected');
+    const br = f.breathe({ refreshCapability: { model_classes: ['tinylm'], trust_score: 0.9 } });
+    assert.ok(br.reAdvertised >= 1 && br.checkpoint && br.memoryValid);
+  });
+}
+
 section('metrics (Prometheus exposition)');
 {
   const metrics = require('./metrics');

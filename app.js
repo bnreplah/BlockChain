@@ -152,15 +152,27 @@ const Fabric = require('./darm-ann/fabric');
 const ValidatorKey = require('./darm-ann/consensus/validatorKey');
 const fabricSeed = require('crypto').createHash('sha256').update('darm-acs|' + (process.env.NODE_URL || currentNodeUrl || n0deAddress)).digest();
 const fabric = new Fabric({ key: ValidatorKey.fromSeed(fabricSeed), name: process.env.ACS_NAME || ('acs-' + n0deAddress.slice(0, 8)),
-    ccil: { stake: Number(process.env.ACS_STAKE || 500), uptime: 1, bvas: 0.9 } });
-// Advertise this node's own memory/inference capability so peers can route to it.
-fabric.advertise({
+    ccil: { stake: Number(process.env.ACS_STAKE || 500), uptime: 1, bvas: 0.9 },
+    // The node's LONG-TERM MEMORY BLOCKCHAIN is this ACS's shard of the fabric's
+    // federated memory (§2.1). `darm` may be hot-swapped on restore, so the
+    // provider reads it lazily.
+    ltmProvider: () => darm.ltm,
+    embed: (text) => darm.embedText(text),
+});
+const ADVERTISED_CAPABILITY = {
     model_classes: ['tinylm', 'slm'], memory_domains: ['ltm', 'rrc'], gpu_tiers: ['edge'],
     latency_class: Number(process.env.ACS_LATENCY || 5), trust_score: 0.9,
     price_curve: Number(process.env.ACS_PRICE || 1), sync_classes: ['async', 'block'], conf_classes: ['redact', 'attested'],
-});
+};
+// Advertise this node's own memory/inference capability so peers can route to it.
+fabric.advertise(ADVERTISED_CAPABILITY);
 fabric.ccil.reconcile(fabric.acsn); // elevate to the role its stake/uptime/bvas earns
-console.log("[DARM-ANN] ACS online ->", fabric.acsn, "role", fabric.ccil.role(fabric.acsn));
+// Autonomous "breathing": re-advertise (keep TTL alive), self-reconcile role,
+// and checkpoint the memory blockchain on a cadence. This is the self-routing,
+// self-correcting heartbeat of a distributed ACS. Interval via ACS_BREATHE_MS.
+const ACS_BREATHE_MS = Number(process.env.ACS_BREATHE_MS || 60000);
+if (ACS_BREATHE_MS > 0) fabric.startBreathing({ intervalMs: ACS_BREATHE_MS, refreshCapability: ADVERTISED_CAPABILITY });
+console.log("[DARM-ANN] ACS online ->", fabric.acsn, "role", fabric.ccil.role(fabric.acsn), "breathing", !!ACS_BREATHE_MS);
 
 // Periodic durable snapshot to the persistent volume (production deploy). The
 // interval (ms) is DARM_SNAPSHOT_MS; 0 disables. Default 60s when a path is set.
@@ -182,6 +194,7 @@ function darmShutdown() {
     if (darmShuttingDown) return; darmShuttingDown = true;
     try { if (persistSnapshot()) console.log("[DARM-ANN] snapshot saved to", DARM_SNAPSHOT); } catch (e) { console.error("[DARM-ANN] snapshot save failed", e.message); }
     if (darmSnapshotTimer) clearInterval(darmSnapshotTimer);
+    if (fabric && fabric.stopBreathing) fabric.stopBreathing();
     darm.stop();
     process.exit(0);
 }
@@ -463,6 +476,32 @@ app.post("/fabric/job", async (req, res)=>{
     const match = b.model_class ? (c)=> Array.isArray(c.model_classes) && c.model_classes.includes(b.model_class) : ()=>true;
     const out = await fabric.runJob({ payload: b.payload, budget: b.budget || 0 }, { match, privacy_mode: b.privacy_mode, sync_class: b.sync_class, conf_class: b.conf_class });
     res.status(out.ok ? 200 : 400).json(out);
+});
+
+// query: DIRP-1 QUERY — answer from THIS node's LTM blockchain shard (read).
+// This is the "shard responds" half of cross-subnet memory federation.
+app.get("/fabric/query", (req, res)=>{
+    res.json(fabric.answerQuery(req.query.q || "", { threshold: Number(req.query.threshold) || 0.6 }));
+});
+
+// federated-query: aggregate local + peer shard answers into ONE result (read).
+// Body: { q, peerAnswers:[answerLocal-shaped...], threshold }. Peers' shard
+// answers are collected out-of-band (gossip/DIRP) and passed in here.
+app.post("/fabric/federated-query", (req, res)=>{
+    const b = req.body || {};
+    res.json(fabric.federatedQuery(b.q || "", { peerAnswers: b.peerAnswers || [], threshold: b.threshold || 0.6 }));
+});
+
+// checkpoint: take a global-chain checkpoint of the LTM memory shard (operator)
+app.post("/fabric/checkpoint", (req, res)=>{
+    const cp = fabric.checkpointMemory();
+    if (!cp) return res.status(400).json({ error: "no LTM bound" });
+    res.json(cp);
+});
+
+// breathe: run one autonomous self-correct/self-route/checkpoint breath (operator)
+app.post("/fabric/breathe", (req, res)=>{
+    res.json(fabric.breathe({ refreshCapability: ADVERTISED_CAPABILITY }));
 });
 
 // rails: register a settlement Rail Profile (operator) / list (read)
