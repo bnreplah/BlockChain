@@ -1,0 +1,67 @@
+# Prometheus alerting rules for the DARM-ANN cluster.
+groups:
+  - name: darm-ann
+    rules:
+      - alert: DarmNodeDown
+        expr: up{job="darm-ann"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "DARM-ANN node {{ $labels.instance }} is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for 30s."
+
+      - alert: DarmLTMChainInvalid
+        expr: darm_ltm_chain_valid == 0
+        for: 15s
+        labels: { severity: critical }
+        annotations:
+          summary: "LTM blockchain invalid on {{ $labels.instance }}"
+          description: "Long-term memory hash-chain failed validation; self-correction should repair it."
+
+      - alert: DarmSTMChainInvalid
+        expr: darm_stm_chain_valid == 0
+        for: 15s
+        labels: { severity: warning }
+        annotations:
+          summary: "STM blockchain invalid on {{ $labels.instance }}"
+          description: "Short-term memory hash-chain failed validation."
+
+      - alert: DarmQuorumAtRisk
+        expr: darm_validators < 4
+        for: 30s
+        labels: { severity: warning }
+        annotations:
+          summary: "Validator set small on {{ $labels.instance }} ({{ $value }})"
+          description: "Fewer than 4 validators reduces Byzantine fault tolerance below f<N/3 for a 7-node design."
+
+      - alert: DarmMempoolBacklog
+        expr: darm_mempool_size > 500
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Mempool backlog on {{ $labels.instance }} ({{ $value }} pending)"
+          description: "Pending transactions are accumulating faster than consensus is committing them."
+
+      - alert: DarmRRCHitRateLow
+        expr: darm_rrc_hit_rate < 0.2 and darm_tier_entries{tier="LTM"} > 20
+        for: 5m
+        labels: { severity: info }
+        annotations:
+          summary: "Low RRC hit-rate on {{ $labels.instance }}"
+          description: "Rapid-retrieval cache hit-rate is low despite a populated LTM; consider warm-up tuning."
+
+      - alert: DarmTaskFailures
+        expr: increase(darm_tasks{status="failed"}[5m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Failed task(s) on {{ $labels.instance }}"
+          description: "One or more tracked operations failed in the last 5m. Check /darm/monitor."
+
+      - alert: DarmTaskBacklog
+        expr: darm_tasks{status="running"} > 10
+        for: 2m
+        labels: { severity: info }
+        annotations:
+          summary: "Task backlog on {{ $labels.instance }} ({{ $value }} running)"
+          description: "Many operations are running concurrently; the node may be saturated."

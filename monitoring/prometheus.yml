@@ -1,0 +1,20 @@
+# Prometheus scrape config for the DARM-ANN cluster.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: darm-ann
+    metrics_path: /darm/metrics
+    static_configs:
+      - targets: ["darm1:3001", "darm2:3002", "darm3:3003"]
+        labels:
+          cluster: darm-ann

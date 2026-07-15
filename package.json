@@ -9,7 +9,22 @@
     "node_1": "nodemon --watch Hotsets -e js ./app.js 3001 http://localhost:3001",
     "node_2": "nodemon --watch Hotsets -e js ./app.js 3002 http://localhost:3002",
     "node_3": "nodemon --watch Hotsets -e js ./app.js 3003 http://localhost:3003",
-    "node_4": "nodemon --watch Hotsets -e js ./app.js 3004 http://localhost:3004"
+    "node_4": "nodemon --watch Hotsets -e js ./app.js 3004 http://localhost:3004",
+    "darm:test": "node ./darm-ann/test.js",
+    "darm:integration": "node ./darm-ann/integration.test.js",
+    "darm:test:all": "node ./darm-ann/test.js && node ./darm-ann/integration.test.js",
+    "darm:demo": "node ./darm-ann/demo.js",
+    "darm:fabric": "node ./darm-ann/fabricDemo.js",
+    "darm:cluster": "node ./darm-ann/cluster.js 5",
+    "darm:rsm": "node ./darm-ann/clusterRSM.js 4",
+    "darm:bench": "node ./darm-ann/bench.js 200 4 10",
+    "darm:chaos": "node ./darm-ann/chaos.js 7 21000 30000",
+    "darm:chaos:partition": "node ./darm-ann/chaos.js 6 21500 --partition",
+    "darm:loadtest": "node ./darm-ann/loadtest.js 500 25",
+    "darm:backup": "node ./darm-ann/backup.js",
+    "darm:agent": "node ./deploy/agent/runner.js",
+    "darm:serve": "node ./app.js 3001 http://localhost:3001",
+    "darm:cli": "node ./darm-ann/cli.js"
   },
   "keywords": [
     "Node",

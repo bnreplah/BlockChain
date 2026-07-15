@@ -1,0 +1,80 @@
+# Default values for the darm-ann chart.
+replicaCount: 3
+
+image:
+  repository: darm-ann
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 3001
+
+# API tokens. Provide your own; empty disables auth (not recommended in prod).
+tokens:
+  # "operator-token:operator,read-token:read"
+  api: "change-me-operator:operator,change-me-read:read"
+  cluster: "change-me-cluster"
+
+config:
+  snapshotPath: /data/node.json
+  snapshotIntervalMs: "60000"
+  minAgeMs: "60000"
+  auditFile: /data/audit.log
+  rateCapacity: "120"
+  ratePerSec: "60"
+  autoRemediate: "1"
+
+persistence:
+  enabled: true
+  size: 1Gi
+  # storageClass: ""
+
+resources:
+  requests: { cpu: "100m", memory: "128Mi" }
+  limits: { cpu: "1", memory: "512Mi" }
+
+# Pod / container security hardening (run as non-root, drop caps, read-only
+# root FS; the app only writes /data (PVC) and /tmp (emptyDir)).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Restrict ingress to peer pods (+ optional namespaces) on the API port.
+networkPolicy:
+  enabled: false
+  allowFromNamespaces: []   # e.g. ["monitoring", "ingress-nginx"]
+
+# Create a Prometheus Operator ServiceMonitor (requires the operator CRDs).
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  labels: {}
+
+# Horizontal Pod Autoscaler (requires metrics-server). Note: scaling a
+# StatefulSet changes the validator set — new pods join via state-sync and an
+# add-validator consensus txn; consider keeping max modest for BFT stability.
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 7
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
+
+# PodDisruptionBudget keeps a BFT quorum available during voluntary disruptions
+# (node drains, rolling updates). For a 3-replica set, minAvailable: 2 preserves
+# >2/3 so consensus can still commit.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+terminationGracePeriodSeconds: 20

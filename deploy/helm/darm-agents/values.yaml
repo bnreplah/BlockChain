@@ -1,0 +1,58 @@
+# DARM-ANN agent fleet — a tier of agents that register to the model.
+image:
+  repository: darm-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The model/registry endpoint agents register against.
+model:
+  url: "http://darm-ann.darm-ann.svc.cluster.local:3001"
+
+# VPN backend: tailscale | generic | local. Tailscale auth key is read from a
+# secret (created when tailscale.authKey is set, or reference an existing one).
+vpn:
+  backend: tailscale
+tailscale:
+  authKey: ""                 # tskey-... (creates a Secret if set)
+  existingSecret: ""          # or reference an existing Secret with key TS_AUTHKEY
+  loginServer: ""             # control/login URL (e.g. self-hosted Headscale);
+                              # empty → Tailscale's default coordination server
+
+# Operator token agents present when registering (model RBAC).
+auth:
+  token: ""                   # DARM_CLUSTER_TOKEN / operator-scope token
+  existingSecret: ""
+
+# Define the fleet. Each entry becomes a Deployment with `replicas` pods.
+# capabilities="" → the tier's defaults. heartbeatMs tunes liveness in the model.
+agents:
+  - name: brain
+    tier: knowledgeable
+    replicas: 1
+    capabilities: ""          # defaults: route,reason,query,teach,consolidate
+  - name: domain
+    tier: generalist
+    replicas: 2
+    capabilities: ""          # defaults: route,reason,query
+  - name: router
+    tier: narrow
+    replicas: 2
+    capabilities: "route"     # the "dumb router"
+  - name: runner
+    tier: worker
+    replicas: 3
+    capabilities: "execute,run-tool"
+
+resources:
+  requests: { cpu: "50m", memory: "64Mi" }
+  limits: { cpu: "500m", memory: "256Mi" }
+
+heartbeatMs: 20000
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]

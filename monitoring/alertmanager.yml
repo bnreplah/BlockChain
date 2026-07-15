@@ -1,0 +1,15 @@
+# Alertmanager config for the DARM-ANN cluster.
+# Default route uses a webhook receiver (replace with Slack/PagerDuty/email as
+# needed). The webhook target is a placeholder reachable on the compose network.
+route:
+  receiver: default
+  group_by: ["alertname"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: "http://darm1:3001/darm/alerts"
+        send_resolved: true

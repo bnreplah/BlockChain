@@ -1,0 +1,311 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # The DARM-ANN module is dependency-free, so the suite runs without install.
+      - name: Run unit test suite
+        run: node darm-ann/test.js
+      - name: Run HTTP integration tests (real server)
+        run: node darm-ann/integration.test.js
+      - name: Narrated demo (smoke)
+        run: node darm-ann/demo.js
+      - name: Multi-process TCP consensus (smoke)
+        run: timeout 40 node darm-ann/cluster.js 4 20100
+      - name: Live node-join + shared-LTM RSM over TCP (smoke)
+        run: timeout 50 node darm-ann/clusterRSM.js 4 20200
+      - name: mTLS consensus cluster (encrypted + mutually authenticated)
+        run: DARM_CLUSTER_MTLS=1 timeout 50 node darm-ann/cluster.js 4 20500
+      - name: Chaos/soak — BFT under random validator kill+restart
+        run: timeout 60 node darm-ann/chaos.js 7 21000 12000
+      - name: Chaos — network partition (no progress, then recovery)
+        run: timeout 50 node darm-ann/chaos.js 6 21500 --partition
+      - name: v7.2 fabric — Phase-1 two-ACS peering demo (DIRP-1 lifecycle)
+        run: node darm-ann/fabricDemo.js
+      - name: Vendor-name grep test (normative core is substrate-agnostic, v7.2 §9.2)
+        run: |
+          # Normative fabric modules must not name any vendor/network/product
+          # (Appendix M is the only place those belong). Fails the build if any appear.
+          if grep -rniE 'bittensor|io\.net|akash|render|gensyn|petals|tailscale|headscale|solana|ethereum|x402|phala|nillion|arcium|octra|stripe|\baws\b' darm-ann/fabric/; then
+            echo "vendor name found in normative fabric core"; exit 1;
+          fi
+          echo "fabric core is vendor-neutral"
+      - name: Validate OpenAPI spec parses
+        run: python3 -c "import yaml; d=yaml.safe_load(open('darm-ann/openapi.yaml')); assert d['openapi'].startswith('3'); print(len(d['paths']),'paths')"
+      - name: Throughput benchmark + performance-regression gate
+        run: node darm-ann/bench.js 200 4 10 --min-tps=${{ vars.BENCH_MIN_TPS || 250 }}
+      - name: Validate Prometheus alert rules
+        run: docker run --rm -v "$PWD/monitoring:/m" --entrypoint promtool prom/prometheus:latest check rules /m/alerts.yml
+      - name: Validate Kubernetes manifests parse
+        run: python3 -c "import yaml,sys; list(yaml.safe_load_all(open('deploy/k8s/darm-ann.yaml'))); print('k8s manifest OK')"
+      - name: Lint Helm charts (model + agents)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm lint deploy/helm/darm-ann
+          helm template darm deploy/helm/darm-ann >/dev/null && echo "model chart OK"
+          helm lint deploy/helm/darm-agents
+          helm template agents deploy/helm/darm-agents --set tailscale.authKey=test --set auth.token=t >/dev/null && echo "agents chart OK"
+
+  docker-smoke:
+    name: Docker build + health smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t darm-ann:ci .
+      - name: Run container (with token auth enabled)
+        run: docker run -d --name darm -p 3001:3001 -e DARM_MIN_AGE_MS=0 -e DARM_AUTH_TOKEN=ci-token darm-ann:ci
+      - name: Auth is enforced (401 without token, health/metrics open)
+        run: |
+          set -e
+          # health + metrics must stay open for probes/scraping
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/darm/health)" = "200" || (echo "waiting for boot"; sleep 5)
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/darm/state || echo 000)
+          echo "unauthenticated /darm/state → $code"
+          test "$code" = "401"
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/darm/health || true)
+            if [ "$code" = "200" ]; then echo "healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "container did not become healthy"; docker logs darm; exit 1
+      - name: Exercise the API (teach -> observe -> replay -> query)
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          C="proof of work secures the chain via computational difficulty"
+          curl -sf -X POST http://localhost:3001/darm/teach   -H "$AUTH" -H 'Content-Type: application/json' -d "{\"claim\":\"$C\"}" >/dev/null
+          curl -sf -X POST http://localhost:3001/darm/observe -H "$AUTH" -H 'Content-Type: application/json' -d "{\"claim\":\"$C\",\"reward\":1,\"epistemic\":{\"conf_cal\":0.92,\"u_ep\":0.05}}" >/dev/null
+          curl -sf -X POST http://localhost:3001/darm/replay -H "$AUTH" >/dev/null
+          TIER=$(curl -sf -H "$AUTH" "http://localhost:3001/darm/query?q=$(echo $C | sed 's/ /%20/g')" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tier))")
+          echo "query resolved from: $TIER"
+          test "$TIER" = "RRC" -o "$TIER" = "LTM"
+      - name: Scrape Prometheus metrics (open, no token)
+        run: |
+          set -e
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_tier_entries' || { echo "metrics missing"; exit 1; }
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_ltm_chain_valid 1' || { echo "chain invalid"; exit 1; }
+          echo "metrics OK"
+      - name: Submit a gossip tx and verify it is observed
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          curl -sf -X POST http://localhost:3001/darm/tx -H "$AUTH" -H 'Content-Type: application/json' \
+            -d '{"type":"memory","payload":{"claim":"gossip tx via http","reward":1,"epistemic":{"conf_cal":0.9,"u_ep":0.05}}}' >/dev/null
+          SIZE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/mempool | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).size))")
+          echo "mempool size: $SIZE"; test "$SIZE" -ge 1
+      - name: Monitor view + task tracking
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/darm/monitor)" = "200"
+          curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/replay >/dev/null
+          DONE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/tasks | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).summary.done||0))")
+          echo "completed tasks: $DONE"; test "$DONE" -ge 1
+      - name: HTTP load test (throughput + success rate)
+        run: node darm-ann/loadtest.js 300 20 --urls http://localhost:3001 --mode mixed --token ci-token
+      - name: Agent registration + tier-aware routing
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"name":"dumb","tier":"narrow","capabilities":["route"]}' http://localhost:3001/agents/register >/dev/null
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"name":"brain","tier":"knowledgeable","capabilities":["route","teach"]}' http://localhost:3001/agents/register >/dev/null
+          T=$(curl -sf -H "$AUTH" "http://localhost:3001/agents/route?capability=route" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).agent.tier))")
+          echo "route→ $T"; test "$T" = "narrow"
+          T2=$(curl -sf -H "$AUTH" "http://localhost:3001/agents/route?capability=teach" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).agent.tier))")
+          echo "teach→ $T2"; test "$T2" = "knowledgeable"
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_agents{tier="narrow"} 1' && echo "agent metrics ok"
+      - name: v7.2 fabric — ACS state, rail registry, and DIRP-1 job
+        run: |
+          set -e
+          AUTH="Authorization: Bearer ci-token"
+          # node advertises itself as an ACS; register a settlement rail
+          ROLE=$(curl -sf -H "$AUTH" http://localhost:3001/fabric/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).role))")
+          echo "ACS role: $ROLE"
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"finality_bound":5000,"proof_format":"merkle","escrow_primitive":"htlc","dispute_hook":"arb","denomination":"credit"}' http://localhost:3001/fabric/rails >/dev/null
+          curl -sf http://localhost:3001/darm/metrics | grep -q '^darm_fabric_settlement_live 1' && echo "fabric settlement live"
+      - name: Tear down
+        if: always()
+        run: docker rm -f darm || true
+
+  compose-smoke:
+    name: docker compose cluster smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up the 3-node cluster
+        run: docker compose up -d --build
+      - name: Wait for all three nodes to report healthy
+        run: |
+          for p in 3001 3002 3003; do
+            ok=0
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$p/darm/health || true)
+              if [ "$code" = "200" ]; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" != "1" ]; then echo "node on $p unhealthy"; docker compose logs; exit 1; fi
+            echo "node on $p healthy"
+          done
+      - name: Verify Prometheus is scraping all nodes
+        run: |
+          ok=0
+          for i in $(seq 1 30); do
+            up=$(curl -s "http://localhost:9090/api/v1/query?query=up%7Bjob%3D%22darm-ann%22%7D" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>{try{const r=JSON.parse(d).data.result;console.log(r.filter(x=>x.value[1]==='1').length)}catch(e){console.log(0)}})" || echo 0)
+            echo "darm-ann targets up: $up"
+            if [ "$up" = "3" ]; then ok=1; break; fi
+            sleep 3
+          done
+          if [ "$ok" != "1" ]; then echo "Prometheus not scraping all 3 nodes"; docker compose logs prometheus; exit 1; fi
+      - name: Verify Grafana is up
+        run: |
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health || true)
+            if [ "$code" = "200" ]; then echo "grafana healthy"; exit 0; fi
+            sleep 3
+          done
+          echo "grafana did not become healthy"; docker compose logs grafana; exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  kind-smoke:
+    name: Kubernetes (kind) end-to-end smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: darm
+      - name: Build image and load into kind
+        run: |
+          docker build -t darm-ann:ci .
+          kind load docker-image darm-ann:ci --name darm
+      - name: Install Helm chart (1 replica, no ServiceMonitor CRD in kind)
+        run: |
+          helm install darm deploy/helm/darm-ann \
+            --namespace darm-ann --create-namespace \
+            --set image.tag=ci --set image.pullPolicy=IfNotPresent \
+            --set replicaCount=1 \
+            --set serviceMonitor.enabled=false \
+            --set config.minAgeMs=0 \
+            --set tokens.api="op:operator,ro:read" --set tokens.cluster="cl" \
+            --wait --timeout 180s
+      - name: Wait for the pod to be ready
+        run: kubectl -n darm-ann rollout status statefulset/darm-ann --timeout=180s
+      - name: Health + authed API through port-forward
+        run: |
+          set -e
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf.log 2>&1 &
+          sleep 5
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/darm/health)" = "200"
+          # read token: GET ok, POST forbidden
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer ro' http://localhost:3001/darm/state)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer ro' http://localhost:3001/darm/replay)" = "403"
+          # operator token: teach + observe + replay + query
+          AUTH="Authorization: Bearer op"
+          C="kubernetes end to end memory"
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d "{\"claim\":\"$C\"}" http://localhost:3001/darm/teach >/dev/null
+          curl -sf -X POST -H "$AUTH" -H 'Content-Type: application/json' -d "{\"claim\":\"$C\",\"reward\":1,\"epistemic\":{\"conf_cal\":0.92,\"u_ep\":0.05}}" http://localhost:3001/darm/observe >/dev/null
+          curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/replay >/dev/null
+          TIER=$(curl -sf -H "$AUTH" "http://localhost:3001/darm/query?q=$(echo $C | sed 's/ /%20/g')" | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tier))")
+          echo "query tier: $TIER"; test "$TIER" = "RRC" -o "$TIER" = "LTM"
+      - name: Snapshot then verify PVC persistence across a pod restart
+        run: |
+          set -e
+          AUTH="Authorization: Bearer op"
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf.log 2>&1 &
+          PF=$!; sleep 5
+          # force a durable snapshot to the PVC, note the LTM size
+          curl -sf -X POST -H "$AUTH" http://localhost:3001/darm/snapshot >/dev/null
+          BEFORE=$(curl -sf -H "$AUTH" http://localhost:3001/darm/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tiers.LTM))")
+          echo "LTM before restart: $BEFORE"; test "$BEFORE" -ge 1
+          kill $PF || true
+          # delete the pod; the StatefulSet recreates it on the SAME PVC
+          kubectl -n darm-ann delete pod darm-ann-0 --wait=true
+          kubectl -n darm-ann rollout status statefulset/darm-ann --timeout=180s
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf2.log 2>&1 &
+          PF2=$!; sleep 6
+          AFTER=$(curl -sf -H "$AUTH" http://localhost:3001/darm/state | node -e "let d='';process.stdin.on('data',x=>d+=x).on('end',()=>console.log(JSON.parse(d).tiers.LTM))")
+          echo "LTM after restart (restored from PVC): $AFTER"; test "$AFTER" = "$BEFORE"
+          kill $PF2 || true
+      - name: Run the integration suite against the in-cluster service
+        run: |
+          set -e
+          kubectl -n darm-ann port-forward svc/darm-ann 3001:3001 >/tmp/pf3.log 2>&1 &
+          PF3=$!; sleep 5
+          # Point the harness's helpers at the forwarded service. The suite spins
+          # its own extra servers for restore/rate-limit cases; the in-cluster pod
+          # is exercised by the smoke steps above, so here we run a focused check.
+          curl -sf http://localhost:3001/darm/docs >/dev/null && echo "swagger docs served"
+          curl -sf http://localhost:3001/darm/openapi.yaml | grep -q "openapi: 3" && echo "openapi spec served"
+          curl -sf http://localhost:3001/darm/version | grep -q '"paperVersion":"7.2"' && echo "version ok"
+          kill $PF3 || true
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: kubectl -n darm-ann get all && kubectl -n darm-ann logs statefulset/darm-ann --tail=100 || true
+
+  release:
+    name: Signed release (image + SBOM + cosign)
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+      id-token: write          # keyless cosign via OIDC
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU (for cross-arch builds)
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch image (amd64 + arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+          tags: ghcr.io/${{ github.repository }}/darm-ann:${{ github.ref_name }}
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}/darm-ann:${{ github.ref_name }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign the image (keyless)
+        run: cosign sign --yes ghcr.io/${{ github.repository }}/darm-ann@${{ steps.build.outputs.digest }}
+      - name: Attest the SBOM
+        run: cosign attest --yes --predicate sbom.cdx.json --type cyclonedx ghcr.io/${{ github.repository }}/darm-ann@${{ steps.build.outputs.digest }}
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json

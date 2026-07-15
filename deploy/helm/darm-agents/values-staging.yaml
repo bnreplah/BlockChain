@@ -1,0 +1,37 @@
+# Staging overrides for the darm-agents (fleet) chart.
+#   helm install agents deploy/helm/darm-agents -n darm-ann \
+#     -f deploy/helm/darm-agents/values-staging.yaml \
+#     --set image.repository=<registry>/darm-agent --set image.tag=<tag>
+#
+# Provide the Tailscale auth key + operator token out-of-band:
+#   kubectl -n darm-ann create secret generic agents-ts   --from-literal=TS_AUTHKEY='tskey-...'
+#   kubectl -n darm-ann create secret generic agents-auth --from-literal=DARM_TOKEN='ops-secret'
+
+image:
+  pullPolicy: IfNotPresent
+
+# The in-cluster model Service (from the darm-ann chart install).
+model:
+  url: "http://darm-ann.darm-ann.svc.cluster.local:3001"
+
+vpn:
+  backend: tailscale
+tailscale:
+  existingSecret: agents-ts
+  # Point at a self-hosted Headscale control plane (empty = Tailscale coordinator).
+  loginServer: "https://headscale.staging.svc.cluster.local"
+auth:
+  existingSecret: agents-auth
+
+# A modest staging fleet across all four tiers.
+agents:
+  - { name: brain,  tier: knowledgeable, replicas: 1, capabilities: "" }
+  - { name: domain, tier: generalist,    replicas: 1, capabilities: "" }
+  - { name: router, tier: narrow,        replicas: 2, capabilities: "route" }
+  - { name: runner, tier: worker,        replicas: 2, capabilities: "execute,run-tool" }
+
+resources:
+  requests: { cpu: "50m", memory: "64Mi" }
+  limits: { cpu: "500m", memory: "256Mi" }
+
+heartbeatMs: 20000
