@@ -16,6 +16,13 @@ const ValidatorKey = require('../consensus/validatorKey');
  * cryptographic backbone.
  */
 
+/** Upper bound on an advertisement's lifetime (TTL-scoped, §2.4). */
+const MAX_TTL_MS = 60 * 60 * 1000;
+/** Tolerated clock skew for `issuedAt` in the future. */
+const MAX_CLOCK_SKEW_MS = 2 * 60 * 1000;
+/** Largest serialized record accepted (bounds RIB memory per peer). */
+const MAX_RECORD_BYTES = 16 * 1024;
+
 class ACS {
   /**
    * @param {object} opts
@@ -49,6 +56,7 @@ class ACS {
    *   ttlMs      — advertisement lifetime; expired ads are ignored (§2.4 TTL-scoped)
    */
   advertise(capability, { ttlMs = 5 * 60 * 1000 } = {}) {
+    if (!(ttlMs > 0 && ttlMs <= MAX_TTL_MS)) throw new Error(`ttlMs must be in (0, ${MAX_TTL_MS}]`);
     const now = Date.now();
     const body = {
       type: 'ADVERTISE',
@@ -95,13 +103,46 @@ class ACS {
     return 'cap:' + crypto.createHash('sha256').update(acsn + '|' + JSON.stringify(capability)).digest('hex').slice(0, 24);
   }
 
-  /** Verify an ADVERTISE/WITHDRAW record's signature + freshness. */
+  /** The ACSN a public key owns: the identity IS the key (§2.2). */
+  static acsnOf(publicKeyB64) {
+    return crypto.createHash('sha256').update(publicKeyB64).digest('hex').slice(0, 32);
+  }
+
+  /**
+   * Verify an ADVERTISE/WITHDRAW record: signature, that the claimed `acsn`
+   * belongs to the signing key (otherwise anyone could advertise — or
+   * WITHDRAW — capabilities as someone else: a route hijack), bounded
+   * size, and for ADVERTISE a mandatory, bounded, not-yet-expired lifetime
+   * that did not start in the future, and an id matching its content.
+   * Pass `now = null` to skip the freshness checks (WITHDRAW).
+   */
   static verifyAdvertisement(record, now = Date.now()) {
-    if (!record || !record.publicKey || !record.signature) return false;
-    if (record.type === 'ADVERTISE' && record.expiresAt && record.expiresAt <= now) return false;
+    if (!record || typeof record !== 'object') return false;
+    if (typeof record.publicKey !== 'string' || typeof record.signature !== 'string') return false;
+    if (record.type !== 'ADVERTISE' && record.type !== 'WITHDRAW') return false;
+    let size;
+    try {
+      size = Buffer.byteLength(JSON.stringify(record));
+    } catch (_e) {
+      return false;
+    }
+    if (size > MAX_RECORD_BYTES) return false;
+    if (record.acsn !== ACS.acsnOf(record.publicKey)) return false;
+    if (!Number.isSafeInteger(record.seq) || record.seq < 0) return false;
+    if (record.type === 'ADVERTISE') {
+      const { issuedAt, expiresAt } = record;
+      if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) return false;
+      if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_TTL_MS) return false;
+      if (record.id !== ACS.capabilityId(record.acsn, record.capability)) return false;
+      if (now != null && (expiresAt <= now || issuedAt > now + MAX_CLOCK_SKEW_MS)) return false;
+    }
     const { publicKey, signature, id, ...body } = record;
     return ValidatorKey.verify(ACS.canonicalBytes(body), signature, publicKey);
   }
 }
+
+ACS.MAX_TTL_MS = MAX_TTL_MS;
+ACS.MAX_CLOCK_SKEW_MS = MAX_CLOCK_SKEW_MS;
+ACS.MAX_RECORD_BYTES = MAX_RECORD_BYTES;
 
 module.exports = ACS;

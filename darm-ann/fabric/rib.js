@@ -23,7 +23,7 @@ class RIB {
 
   /** Ingest a signed ADVERTISE (from GOSSIP or a direct peer). */
   ingestAdvertise(record, now = Date.now()) {
-    if (!ACS.verifyAdvertisement(record, now)) return { ok: false, reason: 'invalid or expired advertisement' };
+    if (record.type !== 'ADVERTISE' || !ACS.verifyAdvertisement(record, now)) return { ok: false, reason: 'invalid or expired advertisement' };
     if (!this.ads.has(record.acsn)) this.ads.set(record.acsn, new Map());
     // Reject stale seq for the same capability id (replay/rollback protection).
     const existing = this.ads.get(record.acsn).get(record.id);
@@ -35,7 +35,9 @@ class RIB {
 
   /** Ingest a signed WITHDRAW. */
   ingestWithdraw(record) {
-    if (!ACS.verifyAdvertisement(record, 0)) return { ok: false, reason: 'invalid withdraw' };
+    // verifyAdvertisement binds acsn to the signing key, so only the owner
+    // of a capability can withdraw it.
+    if (record.type !== 'WITHDRAW' || !ACS.verifyAdvertisement(record, null)) return { ok: false, reason: 'invalid withdraw' };
     const m = this.ads.get(record.acsn);
     if (m) m.delete(record.capabilityId);
     return { ok: true };

@@ -23,6 +23,9 @@ class Replica {
     this.nodeId = nodeId;
     this.key = key;
     this.set = new Map(validators); // id -> { publicKeyB64, weight }
+    if (!(typeof tauC === 'number' && tauC > 2 / 3 && tauC <= 1)) {
+      throw new Error(`tauC must be in (2/3, 1] for quorum intersection (P40), got ${tauC}`);
+    }
     this.tauC = tauC;
     this.wal = wal;
     this.apply = apply; // optional side-effect hook (value, height)

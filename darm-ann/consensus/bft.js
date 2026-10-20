@@ -28,6 +28,9 @@ class BFTNode {
     this.key = key;
     this.validators = validators;
     this.transport = transport;
+    if (!(typeof tauC === 'number' && tauC > 2 / 3 && tauC <= 1)) {
+      throw new Error(`tauC must be in (2/3, 1] for quorum intersection (P40), got ${tauC}`);
+    }
     this.tauC = tauC;
     this.evaluate = evaluate;
     this.onDecide = onDecide;
