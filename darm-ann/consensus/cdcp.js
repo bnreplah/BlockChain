@@ -44,6 +44,12 @@ class Validator {
 
 class CDCP {
   constructor({ self, peers = [], ltm, rrc, stm, bvas, cfg, embedder }) {
+    // P40/P46: two quorums intersect in a correct node only for τ_c > 2/3.
+    // A lower value silently voids BFT safety, so refuse it outright.
+    const tauC = cfg && cfg.cdcp && cfg.cdcp.tauC;
+    if (!(typeof tauC === 'number' && tauC > 2 / 3 && tauC <= 1)) {
+      throw new Error(`cdcp.tauC must be in (2/3, 1], got ${tauC}`);
+    }
     this.self = self;
     this.peers = peers;
     this.ltm = ltm;
@@ -57,6 +63,20 @@ class CDCP {
 
   get voters() {
     return [this.self, ...this.peers];
+  }
+
+  /**
+   * Modeled false-admission probability for the current validator count and
+   * τ_c (Paper 1 §6 / Volume 1 P39, corrected). MODELED: `pNode` and ρ are
+   * assumptions, not measurements. Under correlation, raising τ_c helps far
+   * more than adding validators (Paper 2, H1).
+   */
+  modeledAdmission(pNode = 0.01) {
+    const { modeledAdmission } = require('../fabric/compute');
+    const n = this.voters.length;
+    // Express τ_c as a fraction over 1000 for the exact quorum arithmetic.
+    const threshold = { num: Math.round(this.cfg.cdcp.tauC * 1000), den: 1000 };
+    return modeledAdmission(n, threshold, pNode);
   }
 
   /** Current validator set with up-to-date (G_K-scaled) voting weights. */

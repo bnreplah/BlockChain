@@ -3,6 +3,28 @@
 All notable changes to the DARM-ANN implementation in this repository.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Compute pooling and paper alignment
+
+- **CPU + GPU compute pooling** (`fabric/compute.js`): `capability.compute`
+  advertises CPUs, GPUs and NPUs (with share and live conditions);
+  `computeMatch` routes by device kind through DIRP-1; `planShards` splits jobs
+  across CPU and GPU providers by smooth weighted round robin with replicas on
+  distinct providers that prefer different backends; owner-consent defaults
+  keep phones out unless charging, unmetered and cool.
+- **CDCP admission threshold applied to results** (Papers 1/2): tallies admit
+  at ⌈τ_c·n⌉ of a shard's replicas and otherwise abstain; spot-check replicas
+  implement P66/P67. Mirrors `darm-compute` in DARM-ANMN-LLM.
+- **Corrected P39 model** (`admissionProbability`, Volume 1 §41): reproduces
+  the papers' tables and Hypothesis H1; `cdcp.modeledAdmission()` reports it
+  for the live validator count, labelled *modeled*.
+- **Security fixes:** ADVERTISE/WITHDRAW records were accepted from any key
+  for any ACSN, so anyone could advertise or withdraw capabilities as another
+  ACS (route hijack / routing DoS) — the ACSN is now bound to the signing key;
+  adverts must carry a bounded (≤ 1 h), unexpired lifetime not issued in the
+  future, an id matching their content, and ≤ 16 KiB size. τ_c ≤ 2/3 (which
+  voids quorum intersection, P40) is now refused by CDCP, BFTNode and Replica
+  instead of being accepted from config or `DARM_TAU_C`.
+
 ## [7.2] — Distributed AI Lens (substrate-agnostic fabric)
 
 Implements the DARM-ANN v7.2 whitepaper: each deployment becomes an **Autonomous

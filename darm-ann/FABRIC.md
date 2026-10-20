@@ -95,6 +95,31 @@ ACS-B with a verifiable ATTEST receipt and settlement, routed via DIRP-1 as
 `sync_class=async, conf_class=redact`, plus onion routing (P65), a cloud joining
 as an Adapter ACS (P79 neutrality), and the CCIL incentive math.
 
+## Compute pooling: CPUs and GPUs (`fabric/compute.js`)
+
+A CSP's capability prefix may carry a `compute` block: form factor, devices
+(`cpu`/`gpu`/`npu` with backend, GFLOPS, memory and offered share) and live
+conditions (battery, charging, metered, thermal, load). `offer()` builds it
+under the owner's contribution policy, so a phone offers nothing unless it is
+charging, unmetered and cool. Then:
+
+- `computeMatch({ device: 'cpu'|'gpu'|'any' })` is a DIRP-1 `match` predicate,
+  so jobs route to CPU-only, GPU-only or either kind of provider;
+- `planShards()` splits a job across providers in proportion to effective
+  throughput (CPU and GPU slots together), replicas on distinct providers
+  preferring different backends, with optional spot-check replicas (P66/P67);
+- `tallyReceipts()` admits a shard's output at ⌈τ_c·n⌉ signed receipts from
+  assigned workers (CDCP threshold, Paper 1) and otherwise abstains; it
+  rejects receipts from unassigned workers, for other inputs or with bad
+  signatures, and names dissenters;
+- `admissionProbability()` is the corrected P39 model (Volume 1 §41). Its
+  numbers are **modeled**: ρ is an assumption, not a measurement. It confirms
+  the papers' design finding that under correlated validators a stricter τ_c
+  helps far more than more validators.
+
+The same planner, threshold and receipt rules exist in Rust in DARM-ANMN-LLM
+(`darm-compute`), so both implementations agree.
+
 ## One stand-in (clearly marked)
 
 The onion layer uses real X25519 ECDH per hop (Node `crypto`). The paper

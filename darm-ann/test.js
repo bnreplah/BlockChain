@@ -1524,6 +1524,121 @@ section('facade integration');
   });
 }
 
+// ───────────────────────── fabric/compute (CPU+GPU pool, CDCP admission) ─────────────────────────
+section('fabric/compute (CPU+GPU pooling, P39 admission model, τ_c tallies)');
+{
+  const C = require('./fabric/compute');
+  const ACS = require('./fabric/acs');
+  const RIB = require('./fabric/rib');
+  const ValidatorKey = require('./consensus/validatorKey');
+  const close = (got, want, rel) => assert.ok(Math.abs(got - want) / want <= rel, `got ${got}, paper says ${want}`);
+
+  test('P39 model reproduces Paper 1/2 tables and H1', () => {
+    const t = C.Threshold;
+    close(C.admissionProbability(7, 0.01, 0, t.TWO_THIRDS), 2.1e-9, 0.03);
+    close(C.admissionProbability(7, 0.01, 0.5, t.TWO_THIRDS), 4.74e-4, 0.01);
+    close(C.admissionProbability(21, 0.01, 0.5, t.TWO_THIRDS), 2.151e-4, 0.01);
+    close(C.admissionProbability(21, 5e-4, 0, t.TWO_THIRDS), 7.1e-42, 0.03);
+    close(C.admissionProbability(13, 0.01, 0.3, t.TWO_THIRDS), 9.3e-6, 0.04);
+    const n7 = C.admissionProbability(7, 0.01, 0.5, t.TWO_THIRDS);
+    close(n7 / C.admissionProbability(21, 0.01, 0.5, t.TWO_THIRDS), 2.2, 0.02);
+    close(n7 / C.admissionProbability(7, 0.01, 0.5, t.STRICT), 17.57, 0.02);
+    assert.strictEqual(C.quorum(t.TWO_THIRDS, 21), 14);
+    assert.throws(() => C.validateThreshold({ num: 1, den: 2 }));
+  });
+
+  test('CDCP refuses tau_c <= 2/3 and reports a modeled admission bound', () => {
+    assert.throws(() => fast({ cdcp: { tMinAgeMs: 0, tauC: 0.6 } }), /tauC/);
+    const { BFTNode } = require('./consensus/bft');
+    assert.throws(() => new BFTNode({ nodeId: 'x', key: new ValidatorKey(), validators: new Map(), transport: { register() {}, on() {} }, tauC: NaN }), /tauC/);
+    const node = fast();
+    const m = node.cdcp.modeledAdmission();
+    assert.ok(/modeled/.test(m.label));
+    assert.strictEqual(m.by_correlation.length, 3);
+  });
+
+  test('ACS adverts are bound to their key: no hijacked ADVERTISE or WITHDRAW', () => {
+    const victim = new ACS();
+    const attacker = new ACS();
+    const rib = new RIB();
+    const ad = victim.advertise({ trust_score: 0.9, latency_class: 1 });
+    assert.ok(rib.ingestAdvertise(ad).ok);
+    // Attacker re-signs a record claiming the victim's ACSN.
+    const forged = attacker.advertise({ trust_score: 1 });
+    const { publicKey, signature, id, ...body } = forged;
+    const hijack = { ...body, acsn: victim.acsn };
+    const resigned = { ...hijack, publicKey, signature: attacker.key.sign(ACS.canonicalBytes(hijack)), id: ACS.capabilityId(victim.acsn, hijack.capability) };
+    assert.ok(!rib.ingestAdvertise(resigned).ok, 'cannot advertise as another ACS');
+    const wbody = { type: 'WITHDRAW', acsn: victim.acsn, seq: 99, capabilityId: ad.id, issuedAt: Date.now() };
+    const wforged = { ...wbody, publicKey: attacker.publicKeyB64, signature: attacker.key.sign(ACS.canonicalBytes(wbody)) };
+    assert.ok(!rib.ingestWithdraw(wforged).ok, 'cannot withdraw another ACS capability');
+    assert.strictEqual(rib.adsFor(victim.acsn).length, 1);
+    // Unbounded or missing lifetimes are refused.
+    const now = Date.now();
+    const forever = { type: 'ADVERTISE', acsn: victim.acsn, seq: 5, capability: {}, issuedAt: now };
+    const signedForever = { ...forever, publicKey: victim.publicKeyB64, signature: victim.key.sign(ACS.canonicalBytes(forever)), id: ACS.capabilityId(victim.acsn, {}) };
+    assert.ok(!ACS.verifyAdvertisement(signedForever), 'advert without expiry rejected');
+    assert.throws(() => victim.advertise({}, { ttlMs: ACS.MAX_TTL_MS + 1 }));
+  });
+
+  test('phones contribute only with owner consent; CPUs and GPUs are both offered', () => {
+    const cpu = { kind: 'cpu', backend: 'cpu', gflops: 96, memory_mb: 8192, share_pct: 100 };
+    const unplugged = C.offer({ formFactor: 'phone', devices: [cpu], conditions: { on_battery: true, charging: false, battery_pct: 90 } });
+    assert.strictEqual(unplugged.devices.length, 0);
+    const charging = C.offer({ formFactor: 'phone', devices: [cpu], conditions: { on_battery: true, charging: true, battery_pct: 90 } });
+    assert.strictEqual(charging.devices.length, 1);
+    assert.strictEqual(charging.devices[0].share_pct, 50);
+    const gpu = { kind: 'gpu', backend: 'cuda', gflops: 80000, memory_mb: 24576, share_pct: 100 };
+    const server = C.offer({ formFactor: 'server', devices: [cpu, gpu] });
+    assert.strictEqual(server.devices.length, 2);
+    assert.throws(() => C.validateCompute({ form_factor: 'server', devices: [{ ...gpu, gflops: 1e12 }] }));
+    assert.throws(() => C.validateCompute({ form_factor: 'server', devices: [{ ...gpu, backend: 'cpu' }] }));
+  });
+
+  test('routing and planning pool CPUs and GPUs from the RIB', () => {
+    const rib = new RIB();
+    const nodes = [0, 1, 2, 3].map(() => new ACS());
+    const cpu = { kind: 'cpu', backend: 'cpu', gflops: 128, memory_mb: 16384, share_pct: 100 };
+    const devs = [[cpu], [cpu], [cpu, { kind: 'gpu', backend: 'cuda', gflops: 1280, memory_mb: 24576, share_pct: 100 }], [cpu, { kind: 'gpu', backend: 'rocm', gflops: 1280, memory_mb: 24576, share_pct: 100 }]];
+    nodes.forEach((n, i) => rib.ingestAdvertise(n.advertise({ trust_score: 0.9, compute: C.offer({ formFactor: 'server', devices: devs[i] }) })));
+    assert.strictEqual(rib.advertisersOf(C.computeMatch({ device: 'gpu' })).length, 2);
+    const providers = C.providersFromRib(rib);
+    assert.strictEqual(providers.length, 4);
+    const inputs = Array.from({ length: 60 }, (_, i) => crypto.createHash('sha256').update(String(i)).digest('hex'));
+    const plan = C.planShards({ coordinator: nodes[0].acsn, providers, spec: { inputs, redundancy: 2 } });
+    assert.ok(plan.gpuShards > 0 && plan.cpuShards > 0, 'both kinds used');
+    for (let s = 0; s < inputs.length; s++) {
+      const ws = plan.assignments.filter((a) => a.shard === s).map((a) => a.worker);
+      assert.strictEqual(new Set(ws).size, ws.length, 'replicas on distinct providers');
+    }
+    const cpuOnly = C.planShards({ coordinator: nodes[0].acsn, providers, spec: { inputs, redundancy: 1, device: 'cpu' } });
+    assert.strictEqual(cpuOnly.gpuShards, 0);
+    const spot = C.planShards({ coordinator: nodes[0].acsn, providers, spec: { inputs, redundancy: 1, spotCheck: 0.5 } });
+    assert.ok(spot.spotCheckedShards > 10 && spot.spotCheckedShards < 50, `spot checks: ${spot.spotCheckedShards}`);
+  });
+
+  test('tallies admit at tau_c, flag dissent, and reject outsiders and forgeries', () => {
+    const keys = [0, 1, 2].map(() => new ValidatorKey());
+    const cpu = { kind: 'cpu', backend: 'cpu', gflops: 128, memory_mb: 16384, share_pct: 100 };
+    const providers = keys.map((k) => ({ acsn: k.address, trust: 1, compute: C.offer({ formFactor: 'server', devices: [cpu] }) }));
+    const inputs = ['a', 'b'].map((x) => crypto.createHash('sha256').update(x).digest('hex'));
+    const plan = C.planShards({ coordinator: keys[0].address, providers, spec: { inputs, redundancy: 3 } });
+    const rec = (k, shard, output) => C.signReceipt(k, { job: plan.job, shard, input: inputs[shard], output, device: 'cpu', backend: 'cpu', units: 1, elapsedMs: 5, completedAt: 0 });
+    const receipts = [];
+    for (const shard of [0, 1]) keys.forEach((k, i) => receipts.push(rec(k, shard, shard === 1 && i === 2 ? 'lie' : `out${shard}`)));
+    receipts.push(rec(new ValidatorKey(), 0, 'outsider'));
+    const forged = JSON.parse(JSON.stringify(receipts[0]));
+    forged.receipt.output = 'forged';
+    receipts.push(forged);
+    const result = C.tallyReceipts(plan, receipts);
+    assert.ok(result.complete);
+    assert.strictEqual(result.rejected, 2);
+    assert.deepStrictEqual(result.dissenters, [{ worker: keys[2].address, shard: 1 }]);
+    const strict = C.tallyReceipts({ ...plan, spec: { ...plan.spec, threshold: C.Threshold.STRICT } }, receipts);
+    assert.ok(!strict.complete && strict.shards[1].status === 'disputed', '0.9 needs 3 of 3; shard abstains');
+  });
+}
+
 // ───────────────────────── consensus over real TCP sockets ─────────────────────────
 async function tcpTest() {
   section('consensus/bft over real TCP (multi-socket)');
